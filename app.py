@@ -1,0 +1,902 @@
+import streamlit as st
+import pandas as pd
+import altair as alt
+from supabase import create_client, Client
+import os
+from datetime import datetime
+import tempfile
+import re
+import subprocess
+
+# Initialize Supabase client
+supabase: Client = create_client(
+    st.secrets["SUPABASE_URL"],
+    st.secrets["SUPABASE_KEY"]
+)
+
+# Verify database connection
+def init_db():
+    try:
+        # Test connection by trying to select from tables
+        supabase.table('inventory').select("*").limit(1).execute()
+        supabase.table('orders').select("*").limit(1).execute()
+        supabase.table('production').select("*").limit(1).execute()
+        st.sidebar.success('Connected to Supabase')
+    except Exception as e:
+        st.sidebar.error('Error connecting to database. Please ensure tables are created.')
+        st.sidebar.error(str(e))
+
+# Initialize database connection
+init_db()
+
+# Product details and yields
+products = {
+    'WF Kosher Boneless Beef Ribeye Steak': {
+        'avg_case_weight': 10,
+        'raw_material': 'RIBEYE',
+        'yield': 0.75,
+        'production_cost': 1.58
+    },
+    'WF Kosher Boneless Beef Brisket Flat Cut': {
+        'avg_case_weight': 22,
+        'raw_material': 'BRISKET',
+        'yield': 0.4551971326,  # Brisket Flat yield
+        'production_cost': 1.38,
+        'related_yields': {
+            'Stew': 0.1935483871,  # Will generate this much stew from the same input
+            'Grind': 0.1775822744  # Will generate this much grind from the same input
+        }
+    },
+    'WF Kosher Boneless Beef Chuck Stew': {
+        'avg_case_weight': 8,
+        'raw_material': '2PC CHUCK',
+        'yield': 0.489375,  # Trim portion for ground beef
+        'production_cost': 1.83
+    },
+    'WF Kosher Boneless Beef Chuck Roast': {
+        'avg_case_weight': 11,
+        'raw_material': '2PC CHUCK',
+        'yield': 0.2734375,
+        'production_cost': 1.19,
+        'related_yields': {
+            'Short Rib': 0.1789,
+            'Grind': 0.489375
+        }
+    },
+    'WF Kosher Ground Beef Blend of Chuck & Brisket (80/20)': {
+        'avg_case_weight': 12,
+        'raw_material': '2PC CHUCK',
+        'yield': 0.489375,  # Using the Trim yield
+        'production_cost': 1.11
+    },
+    'WF Kosher Boneless Beef Outside Skirt Steak': {
+        'avg_case_weight': 19,
+        'raw_material': 'OUTSIDE SKIRT',
+        'yield': 0.85,
+        'production_cost': 1.52
+    },
+    'WF Kosher Boneless Beef Short Ribs': {
+        'avg_case_weight': 13,
+        'raw_material': '2PC CHUCK',
+        'yield': 0.1789,
+        'production_cost': 1.51,
+        'related_yields': {
+            'Chuck Roast': 0.2734375,
+            'Grind': 0.489375
+        }
+    }
+}
+
+def calculate_ribeye(quantity):
+    info = products['WF Kosher Boneless Beef Ribeye Steak']
+    raw_material = quantity / info['yield']
+    cost = raw_material * info['production_cost']
+    return {
+        'product': 'RIBEYE',
+        'order_quantity': quantity,
+        'raw_material': raw_material,
+        'cost': cost
+    }
+
+def calculate_brisket(quantity):
+    info = products['WF Kosher Boneless Beef Brisket Flat Cut']
+    raw_material = quantity / info['yield']
+    cost = raw_material * info['production_cost']
+    additional_outputs = []
+    if 'related_yields' in info:
+        for output, yield_rate in info['related_yields'].items():
+            output_quantity = raw_material * yield_rate
+            additional_outputs.append({
+                'product': output,
+                'quantity': output_quantity
+            })
+    return {
+        'product': 'BRISKET',
+        'order_quantity': quantity,
+        'raw_material': raw_material,
+        'cost': cost,
+        'additional_outputs': additional_outputs
+    }
+
+def calculate_chuck_roast(quantity):
+    info = products['WF Kosher Boneless Beef Chuck Roast']
+    raw_material = quantity / info['yield']
+    cost = raw_material * info['production_cost']
+    additional_outputs = []
+    if 'related_yields' in info:
+        for output, yield_rate in info['related_yields'].items():
+            output_quantity = raw_material * yield_rate
+            additional_outputs.append({
+                'product': output,
+                'quantity': output_quantity
+            })
+    return {
+        'product': 'CHUCK ROAST',
+        'order_quantity': quantity,
+        'raw_material': raw_material,
+        'cost': cost,
+        'additional_outputs': additional_outputs
+    }
+
+def calculate_outside_skirt(quantity):
+    info = products['WF Kosher Beef Outside Skirt Steak']
+    raw_material = quantity / info['yield']
+    cost = raw_material * info['production_cost']
+    return {
+        'product': 'OUTSIDE SKIRT',
+        'order_quantity': quantity,
+        'raw_material': raw_material,
+        'cost': cost
+    }
+
+def calculate_stew(quantity):
+    info = products['WF Kosher Beef Stew']
+    raw_material = quantity / info['yield']
+    cost = raw_material * info['production_cost']
+    return {
+        'product': 'STEW',
+        'order_quantity': quantity,
+        'raw_material': raw_material,
+        'cost': cost
+    }
+
+def calculate_short_rib(quantity):
+    info = products['WF Kosher Boneless Beef Short Ribs']
+    raw_material = quantity / info['yield']
+    cost = raw_material * info['production_cost']
+    return {
+        'product': 'BNLS SHORT RIB',
+        'order_quantity': quantity,
+        'raw_material': raw_material,
+        'cost': cost
+    }
+
+def order_planning():
+    st.title('Order Planning')
+    st.markdown('Calculate finished goods output and raw material requirements.')
+    
+    # PO Input
+    po_number = st.text_input("PO Number", key="po_number")
+    
+    # Multiple line items
+    st.subheader("Order Line Items")
+    
+    if 'line_items' not in st.session_state:
+        st.session_state.line_items = [{'product': 'RIBEYE', 'quantity': 0.0}]
+    
+    # Add line item button
+    if st.button("Add Line Item"):
+        st.session_state.line_items.append({'product': 'RIBEYE', 'quantity': 0.0})
+    
+    # Display line items
+    line_items_to_remove = []
+    for idx, item in enumerate(st.session_state.line_items):
+        col1, col2, col3 = st.columns([2, 2, 1])
+        
+        with col1:
+            item['product'] = st.selectbox(
+                "Product",
+                ['RIBEYE', 'BRISKET', 'CHUCK ROAST', 'GROUND BEEF', 'OUTSIDE SKIRT', 'STEW', 'BNLS SHORT RIB'],
+                index=['RIBEYE', 'BRISKET', 'CHUCK ROAST', 'GROUND BEEF', 'OUTSIDE SKIRT', 'STEW', 'BNLS SHORT RIB'].index(item['product']),
+                key=f"product_{idx}"
+            )
+        
+        with col2:
+            item['quantity'] = st.number_input(
+                "Quantity (lbs)",
+                value=float(item['quantity']),
+                step=0.1,
+                key=f"quantity_{idx}"
+            )
+        
+        with col3:
+            if st.button("Remove", key=f"remove_{idx}"):
+                line_items_to_remove.append(idx)
+    
+    # Remove marked line items
+    for idx in reversed(line_items_to_remove):
+        st.session_state.line_items.pop(idx)
+    
+    if st.button('Calculate Order'):
+        if not po_number:
+            st.error("Please enter a PO number")
+            return
+            
+        if not st.session_state.line_items:
+            st.error("Please add at least one line item")
+            return
+            
+        results = []
+        total_cost = 0
+        
+        # Reset order quantities
+        for product in ['ribeye', 'brisket', 'chuck_roast', 'ground_beef', 'outside_skirt', 'stew', 'short_rib']:
+            setattr(st.session_state, f"{product}_order", 0.0)
+        
+        # Set quantities from line items
+        for item in st.session_state.line_items:
+            product_key = item['product'].lower().replace(' ', '_')
+            setattr(st.session_state, f"{product_key}_order", item['quantity'])
+        
+        # Calculate results for each product
+        for item in st.session_state.line_items:
+            product = item['product']
+            quantity = item['quantity']
+            
+            if product == 'RIBEYE' and quantity > 0:
+                result = calculate_ribeye(quantity)
+                results.append(result)
+                total_cost += result['cost']
+            elif product == 'BRISKET' and quantity > 0:
+                result = calculate_brisket(quantity)
+                results.append(result)
+                total_cost += result['cost']
+            elif product == 'CHUCK ROAST' and quantity > 0:
+                result = calculate_chuck_roast(quantity)
+                results.append(result)
+                total_cost += result['cost']
+            elif product == 'OUTSIDE SKIRT' and quantity > 0:
+                result = calculate_outside_skirt(quantity)
+                results.append(result)
+                total_cost += result['cost']
+            elif product == 'STEW' and quantity > 0:
+                result = calculate_stew(quantity)
+                results.append(result)
+                total_cost += result['cost']
+            elif product == 'BNLS SHORT RIB' and quantity > 0:
+                result = calculate_short_rib(quantity)
+                results.append(result)
+                total_cost += result['cost']
+        
+        # Display results
+        st.markdown("---")
+        st.subheader("Order Summary")
+        
+        # Save order to database
+        try:
+            order_data = {
+                'po_number': po_number,
+                'order_date': datetime.now().isoformat(),
+                'line_items': st.session_state.line_items,
+                'total_cost': total_cost
+            }
+            
+            response = supabase.table('orders').insert(order_data).execute()
+            
+            if hasattr(response, 'data'):
+                st.success(f"Order {po_number} saved successfully!")
+            else:
+                st.error("Error saving order")
+            
+        except Exception as e:
+            st.error(f"Error saving order: {str(e)}")
+        
+        # Display calculations
+        for result in results:
+            st.markdown(f"### {result['product']}")
+            st.markdown(f"**Order Quantity:** {result['order_quantity']:.1f} lbs")
+            st.markdown(f"**Raw Material Required:** {result['raw_material']:.1f} lbs")
+            st.markdown(f"**Estimated Cost:** ${result['cost']:.2f}")
+            
+            if 'additional_outputs' in result:
+                st.markdown("**Additional Outputs:**")
+                for output in result['additional_outputs']:
+                    st.markdown(f"- {output['product']}: {output['quantity']:.1f} lbs")
+        
+        st.markdown("---")
+        st.markdown(f"**Total Estimated Cost:** ${total_cost:.2f}")
+
+def inventory_tracking():
+    st.title('Inventory Tracking')
+    st.markdown('Record raw material orders and production records below.')
+    
+    tab1, tab2, tab3 = st.tabs(["Raw Material Purchase", "Upload Invoice", "Production Record"])
+    
+    with tab1:
+        with st.form('inventory_purchase_form'):
+            material = st.selectbox('Raw Material', ['RIBEYE', 'BRISKET', '2PC CHUCK', 'OUTSIDE SKIRT'])
+            quantity = st.number_input('Quantity (lbs)', min_value=0.0, step=0.1, value=0.0)
+            cost = st.number_input('Total Cost ($)', min_value=0.0, step=0.1, value=0.0)
+            submitted = st.form_submit_button('Add Purchase Record')
+            
+            if submitted:
+                data = {
+                    'material': material,
+                    'quantity': quantity,
+                    'cost': cost,
+                    'date': datetime.now().isoformat(),
+                    'transaction_type': 'purchase'
+                }
+                response = supabase.table('inventory').insert(data).execute()
+                if hasattr(response, 'data'):
+                    st.success('Purchase record added successfully')
+                else:
+                    st.error('Error adding purchase record')
+    
+    with tab2:
+        st.subheader("Upload Invoice PDF")
+        uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+        
+        if uploaded_file is not None:
+            try:
+                # Create a temporary file
+                temp_dir = tempfile.mkdtemp()
+                temp_path = os.path.join(temp_dir, "temp.pdf")
+                
+                with open(temp_path, "wb") as f:
+                    f.write(uploaded_file.getvalue())
+                
+                # Use absolute path to Poppler
+                poppler_path = "/opt/homebrew/Cellar/poppler/25.02.0/bin"
+                st.success(f"Using Poppler at: {poppler_path}")
+                
+                # Convert PDF to images with explicit path
+                try:
+                    images = convert_from_path(
+                        temp_path,
+                        poppler_path=poppler_path,
+                        dpi=300,  # Increase DPI for better quality
+                        fmt='jpeg'  # Use JPEG format for better OCR
+                    )
+                    st.success(f"Successfully converted PDF to {len(images)} images")
+                except Exception as e:
+                    st.error(f"Error converting PDF: {str(e)}")
+                    st.error("Detailed error information:")
+                    st.error(f"Poppler path exists: {os.path.exists(poppler_path)}")
+                    st.error(f"Poppler binaries:")
+                    st.code("\n".join(os.listdir(poppler_path)))
+                    st.error(f"PDF path exists: {os.path.exists(temp_path)}")
+                    st.error(f"PDF size: {os.path.getsize(temp_path)} bytes")
+                    raise e
+                
+                # Extract text using OCR
+                try:
+                    # Verify Tesseract installation
+                    tesseract_version = subprocess.check_output([pytesseract.pytesseract.tesseract_cmd, '--version']).decode()
+                    st.success(f"Using Tesseract version: {tesseract_version.split()[1]}")
+                    
+                    extracted_text = ""
+                    for idx, image in enumerate(images):
+                        st.info(f"Processing page {idx + 1}...")
+                        page_text = pytesseract.image_to_string(image)
+                        extracted_text += f"\n--- Page {idx + 1} ---\n{page_text}"
+                    st.success("OCR completed successfully")
+                except Exception as e:
+                    st.error(f"Error performing OCR: {str(e)}")
+                    st.error("Detailed error information:")
+                    st.error(f"Tesseract path exists: {os.path.exists('/opt/homebrew/bin/tesseract')}")
+                    st.error(f"Tesseract path is executable: {os.access('/opt/homebrew/bin/tesseract', os.X_OK)}")
+                    raise e
+                
+                # Define patterns for different invoice formats
+                patterns = {
+                    'date': r'(?i)Invoice Date:\s*(\d{2}/\d{2}/\d{4})',
+                    'invoice_number': r'(?i)Invoice\s*\n(\d+)',
+                    'line_items': r'(?im)^\d+\s+\d+\s+(.*?)\s+([0-9,]+\.\d+)\s+LB\s+([0-9.]+)\s+([0-9,]+\.\d+)$'
+                }
+
+                # Product name mapping for standardization
+                product_mapping = {
+                    'chuck 2pc bnls': '2PC CHUCK',
+                    'chuck 2pc': '2PC CHUCK',
+                    'outside skirt': 'OUTSIDE SKIRT',
+                    'brisket': 'BRISKET',
+                    'ribeye': 'RIBEYE'
+                }
+
+                # Extract information
+                extracted_info = {
+                    'date': None,
+                    'invoice_number': None,
+                    'line_items': []
+                }
+
+                # Extract date
+                date_match = re.search(patterns['date'], extracted_text)
+                if date_match:
+                    extracted_info['date'] = date_match.group(1)
+
+                # Extract invoice number
+                invoice_match = re.search(patterns['invoice_number'], extracted_text)
+                if invoice_match:
+                    extracted_info['invoice_number'] = invoice_match.group(1)
+
+                # Extract line items
+                line_items = re.finditer(patterns['line_items'], extracted_text)
+                for match in line_items:
+                    product_desc, quantity, price_per_lb, total = match.groups()
+                    
+                    # Clean up the extracted values
+                    product_desc = product_desc.lower().strip()
+                    quantity = float(quantity.replace(',', ''))
+                    price_per_lb = float(price_per_lb)
+                    total = float(total.replace(',', ''))
+                    
+                    # Find matching standardized product name
+                    standardized_product = None
+                    for key, value in product_mapping.items():
+                        if key in product_desc:
+                            standardized_product = value
+                            break
+                    
+                    if standardized_product:
+                        extracted_info['line_items'].append({
+                            'product': standardized_product,
+                            'quantity': quantity,
+                            'price_per_lb': price_per_lb,
+                            'total': total
+                        })
+
+                # Display raw extracted text in expander
+                with st.expander("View Raw Extracted Text"):
+                    st.text(extracted_text)
+
+                # Display extracted information for verification
+                st.subheader("Invoice Details")
+                col1, col2 = st.columns(2)
+                with col1:
+                    if extracted_info['date']:
+                        try:
+                            parsed_date = parser.parse(extracted_info['date'])
+                            invoice_date = st.date_input("Invoice Date", value=parsed_date)
+                        except:
+                            invoice_date = st.date_input("Invoice Date")
+                    else:
+                        invoice_date = st.date_input("Invoice Date")
+
+                with col2:
+                    invoice_number = st.text_input(
+                        "Invoice Number",
+                        value=extracted_info.get('invoice_number', ''),
+                        placeholder="Enter invoice number"
+                    )
+
+                st.subheader("Line Items")
+                st.info("Please verify and correct the extracted information if needed")
+
+                if not extracted_info['line_items']:
+                    st.warning("No line items were found in the invoice. Please check the raw text and verify the format.")
+                else:
+                    for idx, item in enumerate(extracted_info['line_items']):
+                        st.markdown(f"### Line Item {idx + 1}")
+                        col1, col2, col3 = st.columns(3)
+                        
+                        with col1:
+                            item['product'] = st.selectbox(
+                                "Raw Material",
+                                ['RIBEYE', 'BRISKET', '2PC CHUCK', 'OUTSIDE SKIRT'],
+                                index=['RIBEYE', 'BRISKET', '2PC CHUCK', 'OUTSIDE SKIRT'].index(item['product']),
+                                key=f"product_{idx}"
+                            )
+                            
+                            item['quantity'] = st.number_input(
+                                "Quantity (lbs)",
+                                value=item['quantity'],
+                                step=0.1,
+                                key=f"quantity_{idx}"
+                            )
+                        
+                        with col2:
+                            item['price_per_lb'] = st.number_input(
+                                "Price per lb ($)",
+                                value=item['price_per_lb'],
+                                step=0.0001,
+                                format="%.4f",
+                                key=f"price_{idx}"
+                            )
+                        
+                        with col3:
+                            item['total'] = st.number_input(
+                                "Total Cost ($)",
+                                value=item['total'],
+                                step=0.01,
+                                key=f"total_{idx}"
+                            )
+                            
+                            # Add a calculated field to show verification
+                            calculated_total = item['quantity'] * item['price_per_lb']
+                            if abs(calculated_total - item['total']) > 0.01:
+                                st.warning(f"Calculated total (${calculated_total:.2f}) differs from invoice total (${item['total']:.2f})")
+
+                if st.button("Confirm and Save All Items"):
+                    for item in extracted_info['line_items']:
+                        data = {
+                            'material': item['product'],
+                            'quantity': item['quantity'],
+                            'price_per_lb': item['price_per_lb'],
+                            'cost': item['total'],
+                            'date': invoice_date.isoformat(),
+                            'invoice_number': invoice_number,
+                            'transaction_type': 'purchase'
+                        }
+                        
+                        response = supabase.table('inventory').insert(data).execute()
+                        
+                        if hasattr(response, 'data'):
+                            st.success(f'Successfully saved {item["product"]} purchase record')
+                        else:
+                            st.error(f'Error saving {item["product"]} purchase record')
+
+                # Cleanup temporary files
+                os.remove(temp_path)
+                os.rmdir(temp_dir)
+                
+            except Exception as e:
+                st.error(f"Error processing PDF: {str(e)}")
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+                if os.path.exists(temp_dir):
+                    os.rmdir(temp_dir)
+                
+                # Show detailed system information
+                st.error("System Information:")
+                try:
+                    brew_prefix = subprocess.check_output(['/opt/homebrew/bin/brew', '--prefix']).decode().strip()
+                    st.code(f"""
+                    Homebrew prefix: {brew_prefix}
+                    Poppler installation:
+                    {subprocess.check_output(['ls', '-l', f'{brew_prefix}/bin/pdftoppm']).decode()}
+                    
+                    PATH environment:
+                    {os.environ.get('PATH', 'PATH not set')}
+                    """)
+                except Exception as sys_e:
+                    st.error(f"Error getting system information: {str(sys_e)}")
+    
+    with tab3:
+        with st.form('production_record_form'):
+            product = st.selectbox('Product', list(products.keys()))
+            input_material = st.selectbox('Input Material', ['RIBEYE', 'BRISKET', '2PC CHUCK', 'OUTSIDE SKIRT'])
+            input_quantity = st.number_input('Input Quantity (lbs)', min_value=0.0, step=0.1, value=0.0)
+            output_quantity = st.number_input('Output Quantity (lbs)', min_value=0.0, step=0.1, value=0.0)
+            
+            submitted = st.form_submit_button('Add Production Record')
+            
+            if submitted:
+                if input_quantity > 0 and output_quantity > 0:
+                    yield_rate = output_quantity / input_quantity
+                    
+                    # Record production
+                    prod_data = {
+                        'product': product,
+                        'input_material': input_material,
+                        'input_quantity': input_quantity,
+                        'output_quantity': output_quantity,
+                        'yield': yield_rate,
+                        'date': datetime.now().isoformat()
+                    }
+                    
+                    # Update inventory
+                    inv_data = {
+                        'material': input_material,
+                        'quantity': -input_quantity,  # negative because we're using the material
+                        'cost': 0,  # cost is already accounted for in the purchase
+                        'date': datetime.now().isoformat(),
+                        'transaction_type': 'production'
+                    }
+                    
+                    response1 = supabase.table('production').insert(prod_data).execute()
+                    response2 = supabase.table('inventory').insert(inv_data).execute()
+                    
+                    if hasattr(response1, 'data') and hasattr(response2, 'data'):
+                        st.success('Production record added successfully')
+                    else:
+                        st.error('Error adding production record')
+                else:
+                    st.error('Input and output quantities must be greater than 0')
+
+def display_dashboard():
+    st.title('Dashboard')
+    st.markdown('Overview of order history and production metrics.')
+    
+    # Fetch data from Supabase
+    production = supabase.table('production').select("*").execute()
+    
+    if hasattr(production, 'data') and len(production.data) > 0:
+        production_df = pd.DataFrame(production.data)
+        
+        # Sort by PO number
+        def extract_po_number(po):
+            if pd.isna(po):
+                return float('inf')  # Put NaN values at the end
+            match = re.search(r'(\d+)', str(po))
+            return float('inf') if match is None else int(match.group(1))
+        
+        production_df = production_df.sort_values(by='po_number', key=lambda x: x.map(extract_po_number))
+        
+        # Display metrics
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            avg_yield = production_df['yield'].mean()
+            st.metric("Average Yield", f"{avg_yield:.1%}")
+        
+        with col2:
+            total_input = production_df['input_quantity'].sum()
+            st.metric("Total Input (lbs)", f"{total_input:,.0f}")
+        
+        with col3:
+            total_output = production_df['output_quantity'].sum()
+            st.metric("Total Output (lbs)", f"{total_output:,.0f}")
+        
+        # Yield trends
+        st.subheader('Yield Trends')
+        yield_chart = alt.Chart(production_df).mark_line(point=True).encode(
+            x=alt.X('po_number:N', title='PO Number'),
+            y=alt.Y('yield:Q', title='Yield %', scale=alt.Scale(domain=[0, 1])),
+            color=alt.Color('product:N', title='Product'),
+            tooltip=['po_number', 'product', 
+                    alt.Tooltip('yield:Q', format='.1%'),
+                    alt.Tooltip('input_quantity:Q', format=',.1f', title='Input (lbs)'),
+                    alt.Tooltip('output_quantity:Q', format=',.1f', title='Output (lbs)')]
+        ).properties(
+            title='Yield Trends by Product',
+            width=800,
+            height=400
+        ).interactive()
+        
+        st.altair_chart(yield_chart)
+        
+        # Display detailed data table
+        st.subheader('Production Details')
+        display_df = production_df.copy()
+        display_df['yield'] = display_df['yield'].apply(lambda x: f"{x:.1%}")
+        display_df['input_quantity'] = display_df['input_quantity'].apply(lambda x: f"{x:,.1f}")
+        display_df['output_quantity'] = display_df['output_quantity'].apply(lambda x: f"{x:,.1f}")
+        st.dataframe(
+            display_df[['po_number', 'product', 'input_material', 'input_quantity', 'output_quantity', 'yield']],
+            hide_index=True
+        )
+    else:
+        st.info("No production data available")
+
+def order_board():
+    st.title('Order Board')
+    st.markdown('Track and manage orders')
+    
+    # Fetch orders from database
+    response = supabase.table('orders').select('*').order('order_date', desc=True).execute()
+    
+    if hasattr(response, 'data') and len(response.data) > 0:
+        orders_df = pd.DataFrame(response.data)
+        
+        # Add filters
+        col1, col2 = st.columns(2)
+        with col1:
+            status_filter = st.multiselect(
+                'Filter by Status',
+                ['pending', 'in_production', 'completed', 'cancelled'],
+                default=['pending', 'in_production']
+            )
+        
+        with col2:
+            search = st.text_input('Search PO Number')
+        
+        # Filter dataframe
+        filtered_df = orders_df[
+            (orders_df['status'].isin(status_filter)) &
+            (orders_df['po_number'].str.contains(search, case=False, na=False))
+        ]
+        
+        # Display orders
+        for _, order in filtered_df.iterrows():
+            with st.expander(f"PO #{order['po_number']} - {order['status'].title()} - {pd.to_datetime(order['order_date']).strftime('%Y-%m-%d')}"):
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.markdown(f"**Total Cost:** ${order['total_cost']:,.2f}")
+                
+                with col2:
+                    st.markdown(f"**Status:** {order['status'].title()}")
+                
+                with col3:
+                    new_status = st.selectbox(
+                        'Update Status',
+                        ['pending', 'in_production', 'completed', 'cancelled'],
+                        index=['pending', 'in_production', 'completed', 'cancelled'].index(order['status']),
+                        key=f"status_{order['id']}"
+                    )
+                    
+                    if new_status != order['status']:
+                        if st.button('Update', key=f"update_{order['id']}"):
+                            response = supabase.table('orders').update({'status': new_status}).eq('id', order['id']).execute()
+                            if hasattr(response, 'data'):
+                                st.success('Status updated!')
+                                st.rerun()
+                
+                st.markdown("### Line Items")
+                for item in order['line_items']:
+                    st.markdown(f"- {item['product']}: {item['quantity']:,.1f} lbs")
+    else:
+        st.info("No orders found")
+
+# Sidebar Navigation
+st.sidebar.title('Order Calculator App')
+page = st.sidebar.radio('Select Page', ['Calculator', 'Inventory Tracking', 'Dashboard', 'Order Planning', 'Order Board'])
+
+# Page routing
+if page == 'Calculator':
+    st.title('Order Calculator')
+    st.markdown('Enter purchase order cases and existing raw materials inventory below')
+    
+    # Create three columns for different product categories
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.subheader('Independent Products')
+        # Ribeye and Outside Skirt
+        order_inputs = {}
+        order_inputs['WF Kosher Boneless Beef Ribeye Steak'] = st.number_input(
+            'Ribeye Steak (cases)', 
+            min_value=0, 
+            step=1, 
+            value=0
+        )
+        order_inputs['WF Kosher Boneless Beef Outside Skirt Steak'] = st.number_input(
+            'Outside Skirt Steak (cases)', 
+            min_value=0, 
+            step=1, 
+            value=0
+        )
+    
+    with col2:
+        st.subheader('Brisket Products')
+        # Only input for Brisket Flat
+        brisket_cases = st.number_input(
+            'Brisket Flat Cut (cases)', 
+            min_value=0, 
+            step=1, 
+            value=0
+        )
+        order_inputs['WF Kosher Boneless Beef Brisket Flat Cut'] = brisket_cases
+        
+        if brisket_cases > 0:
+            # Calculate related products
+            brisket_info = products['WF Kosher Boneless Beef Brisket Flat Cut']
+            total_input_needed = (brisket_cases * brisket_info['avg_case_weight']) / brisket_info['yield']
+            
+            st.info(f"""
+            From {total_input_needed:.2f} lbs of Brisket input, you will get:
+            - {(total_input_needed * brisket_info['related_yields']['Stew']):.2f} lbs of Stew
+            - {(total_input_needed * brisket_info['related_yields']['Grind']):.2f} lbs of Grind for blending
+            """)
+    
+    with col3:
+        st.subheader('Chuck Products')
+        # Radio button to select which Chuck product to input
+        chuck_product = st.radio(
+            "Select Chuck product to input:",
+            ['Chuck Roast', 'Short Ribs', 'Ground Beef']
+        )
+        
+        chuck_cases = st.number_input(
+            f'{chuck_product} (cases)', 
+            min_value=0, 
+            step=1, 
+            value=0
+        )
+        
+        if chuck_product == 'Chuck Roast':
+            order_inputs['WF Kosher Boneless Beef Chuck Roast'] = chuck_cases
+            if chuck_cases > 0:
+                roast_info = products['WF Kosher Boneless Beef Chuck Roast']
+                total_input_needed = (chuck_cases * roast_info['avg_case_weight']) / roast_info['yield']
+                st.info(f"""
+                From {total_input_needed:.2f} lbs of Chuck input, you will get:
+                - {(total_input_needed * roast_info['related_yields']['Short Rib']):.2f} lbs of Short Ribs
+                - {(total_input_needed * roast_info['related_yields']['Grind']):.2f} lbs of Grind
+                """)
+        
+        elif chuck_product == 'Short Ribs':
+            order_inputs['WF Kosher Boneless Beef Short Ribs'] = chuck_cases
+            if chuck_cases > 0:
+                shortrib_info = products['WF Kosher Boneless Beef Short Ribs']
+                total_input_needed = (chuck_cases * shortrib_info['avg_case_weight']) / shortrib_info['yield']
+                st.info(f"""
+                From {total_input_needed:.2f} lbs of Chuck input, you will get:
+                - {(total_input_needed * shortrib_info['related_yields']['Chuck Roast']):.2f} lbs of Chuck Roast
+                - {(total_input_needed * shortrib_info['related_yields']['Grind']):.2f} lbs of Grind
+                """)
+        
+        else:  # Ground Beef
+            order_inputs['WF Kosher Ground Beef Blend of Chuck & Brisket (80/20)'] = chuck_cases
+            if chuck_cases > 0:
+                ground_info = products['WF Kosher Ground Beef Blend of Chuck & Brisket (80/20)']
+                total_input_needed = (chuck_cases * ground_info['avg_case_weight']) / ground_info['yield']
+                # Calculate related products using Chuck Roast's related yields since they share the same source
+                roast_info = products['WF Kosher Boneless Beef Chuck Roast']
+                st.info(f"""
+                From {total_input_needed:.2f} lbs of Chuck input, you will get:
+                - {(total_input_needed * roast_info['related_yields']['Short Rib']):.2f} lbs of Short Ribs
+                - {(total_input_needed * 0.2734375):.2f} lbs of Chuck Roast
+                """)
+    
+    st.subheader('Existing Raw Material Inventory (lbs)')
+    col4, col5 = st.columns(2)
+    with col4:
+        inventory = {}
+        inventory['RIBEYE'] = st.number_input('Current RIBEYE inventory', min_value=0.0, step=0.1, value=0.0)
+        inventory['BRISKET'] = st.number_input('Current BRISKET inventory', min_value=0.0, step=0.1, value=0.0)
+    with col5:
+        inventory['2PC CHUCK'] = st.number_input('Current 2PC CHUCK inventory', min_value=0.0, step=0.1, value=0.0)
+        inventory['OUTSIDE SKIRT'] = st.number_input('Current OUTSIDE SKIRT inventory', min_value=0.0, step=0.1, value=0.0)
+    
+    if st.button('Calculate Order'):
+        results = []
+        total_cost = 0
+        
+        # Group raw materials needed
+        raw_materials_needed = {
+            'RIBEYE': 0,
+            'BRISKET': 0,
+            '2PC CHUCK': 0,
+            'OUTSIDE SKIRT': 0
+        }
+        
+        # Define yields for raw materials
+        raw_material_yields = {
+            'RIBEYE': 0.75,  # From Ribeye product
+            'BRISKET': 0.4551971326,  # From Brisket Flat
+            '2PC CHUCK': 0.2734375,  # Using Chuck Roast yield as base
+            'OUTSIDE SKIRT': 0.85  # From Outside Skirt product
+        }
+        
+        for product, cases in order_inputs.items():
+            if cases > 0:
+                info = products[product]
+                finished_lbs = cases * info['avg_case_weight']
+                required_raw = finished_lbs / info['yield']
+                raw_materials_needed[info['raw_material']] += required_raw
+        
+        # Calculate new orders needed
+        for material, required in raw_materials_needed.items():
+            if required > 0:
+                current_inv = inventory.get(material, 0)
+                # Convert existing inventory to raw material equivalent
+                current_inv_raw = current_inv / raw_material_yields[material]
+                order_needed = max(required - current_inv_raw, 0)
+                if order_needed > 0:
+                    results.append({
+                        'Raw Material': material,
+                        'Total Required (lbs)': round(required, 2),
+                        'Current Inventory (finished lbs)': current_inv,
+                        'Current Inventory (raw lbs)': round(current_inv_raw, 2),
+                        'New Order Needed (lbs)': round(order_needed, 2)
+                    })
+        
+        if results:
+            st.write(pd.DataFrame(results))
+        else:
+            st.info('Current inventory is sufficient for this order.')
+
+elif page == 'Inventory Tracking':
+    inventory_tracking()
+    
+elif page == 'Dashboard':
+    display_dashboard()
+    
+elif page == 'Order Planning':
+    order_planning()
+    
+elif page == 'Order Board':
+    order_board()
