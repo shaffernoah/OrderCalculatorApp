@@ -3,10 +3,14 @@ import pandas as pd
 import altair as alt
 from supabase import create_client, Client
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import tempfile
 import re
 import subprocess
+from PIL import Image
+from pdf2image import convert_from_path
+import pytesseract
+from dateutil import parser
 
 # Initialize Supabase client
 supabase: Client = create_client(
@@ -47,12 +51,6 @@ products = {
             'Grind': 0.1775822744  # Will generate this much grind from the same input
         }
     },
-    'WF Kosher Boneless Beef Chuck Stew': {
-        'avg_case_weight': 8,
-        'raw_material': '2PC CHUCK',
-        'yield': 0.489375,  # Trim portion for ground beef
-        'production_cost': 1.83
-    },
     'WF Kosher Boneless Beef Chuck Roast': {
         'avg_case_weight': 11,
         'raw_material': '2PC CHUCK',
@@ -69,7 +67,7 @@ products = {
         'yield': 0.489375,  # Using the Trim yield
         'production_cost': 1.11
     },
-    'WF Kosher Boneless Beef Outside Skirt Steak': {
+    'WF Kosher Beef Outside Skirt Steak': {
         'avg_case_weight': 19,
         'raw_material': 'OUTSIDE SKIRT',
         'yield': 0.85,
@@ -84,6 +82,12 @@ products = {
             'Chuck Roast': 0.2734375,
             'Grind': 0.489375
         }
+    },
+    'WF Kosher Beef Stew': {
+        'avg_case_weight': 8,
+        'raw_material': '2PC CHUCK',
+        'yield': 0.489375,  # Trim portion for ground beef
+        'production_cost': 1.83
     }
 }
 
@@ -173,138 +177,218 @@ def calculate_short_rib(quantity):
 
 def order_planning():
     st.title('Order Planning')
-    st.markdown('Calculate finished goods output and raw material requirements.')
+    st.markdown('Create and manage purchase orders')
     
-    # PO Input
-    po_number = st.text_input("PO Number", key="po_number")
+    # Custom CSS for styling
+    st.markdown("""
+        <style>
+        .main {
+            font-size: 18px;
+        }
+        .valid-input {
+            border-color: #28a745 !important;
+        }
+        .invalid-input {
+            border-color: #dc3545 !important;
+        }
+        @media (max-width: 768px) {
+            .stColumns {
+                gap: 0.5rem;
+            }
+        }
+        </style>
+    """, unsafe_allow_html=True)
     
-    # Multiple line items
-    st.subheader("Order Line Items")
+    # Initialize session state
+    if 'item_count' not in st.session_state:
+        st.session_state.item_count = 1
+    if 'notes' not in st.session_state:
+        st.session_state.notes = ""
     
-    if 'line_items' not in st.session_state:
-        st.session_state.line_items = [{'product': 'RIBEYE', 'quantity': 0.0}]
+    # Order templates
+    templates = {
+        'Default': [],
+        'Common Order A': [
+            {'product': 'WF Kosher Boneless Beef Ribeye Steak', 'quantity': 100},
+            {'product': 'WF Kosher Boneless Beef Brisket Flat Cut', 'quantity': 50},
+        ],
+        'Common Order B': [
+            {'product': 'WF Kosher Boneless Beef Chuck Roast', 'quantity': 75},
+            {'product': 'WF Kosher Beef Outside Skirt Steak', 'quantity': 25},
+        ]
+    }
     
-    # Add line item button
-    if st.button("Add Line Item"):
-        st.session_state.line_items.append({'product': 'RIBEYE', 'quantity': 0.0})
+    # Header section
+    col1, col2, col3 = st.columns([2, 1, 1])
+    with col1:
+        po_number = st.text_input('PO Number', placeholder='Enter PO number')
+    with col2:
+        po_date = st.date_input('PO Date', value=datetime.now().date())
+    with col3:
+        delivery_date = st.date_input('Delivery Date', value=(datetime.now() + timedelta(days=7)).date())
+
+    # Template selection
+    template = st.selectbox('Load Template', ['Default'] + list(templates.keys())[1:])
+    if template != 'Default' and template in templates:
+        st.session_state.item_count = len(templates[template])
     
-    # Display line items
-    line_items_to_remove = []
-    for idx, item in enumerate(st.session_state.line_items):
-        col1, col2, col3 = st.columns([2, 2, 1])
+    # Product list for dropdown - using exact names from products dictionary
+    product_list = [
+        'WF Kosher Boneless Beef Ribeye Steak',
+        'WF Kosher Boneless Beef Brisket Flat Cut',
+        'WF Kosher Boneless Beef Chuck Roast',
+        'WF Kosher Beef Outside Skirt Steak',
+        'WF Kosher Beef Stew',
+        'WF Kosher Boneless Beef Short Ribs'
+    ]
+    
+    # Line items
+    st.markdown('### Line Items')
+    
+    line_items = []
+    total_cost = 0
+    
+    for i in range(st.session_state.item_count):
+        col1, col2 = st.columns([2, 1])
         
         with col1:
-            item['product'] = st.selectbox(
-                "Product",
-                ['RIBEYE', 'BRISKET', 'CHUCK ROAST', 'GROUND BEEF', 'OUTSIDE SKIRT', 'STEW', 'BNLS SHORT RIB'],
-                index=['RIBEYE', 'BRISKET', 'CHUCK ROAST', 'GROUND BEEF', 'OUTSIDE SKIRT', 'STEW', 'BNLS SHORT RIB'].index(item['product']),
-                key=f"product_{idx}"
+            if template != 'Default' and i < len(templates[template]):
+                default_product = templates[template][i]['product']
+                default_quantity = templates[template][i]['quantity']
+            else:
+                default_product = product_list[0]
+                default_quantity = 0
+            
+            product = st.selectbox(
+                f'Product {i+1}',
+                product_list,
+                key=f'product_{i}',
+                index=product_list.index(default_product) if default_product in product_list else 0
             )
         
         with col2:
-            item['quantity'] = st.number_input(
-                "Quantity (lbs)",
-                value=float(item['quantity']),
+            quantity = st.number_input(
+                f'Quantity (lbs) {i+1}',
+                min_value=0.0,
+                value=float(default_quantity),
                 step=0.1,
-                key=f"quantity_{idx}"
+                key=f'quantity_{i}',
+                help='Enter quantity in pounds'
             )
         
-        with col3:
-            if st.button("Remove", key=f"remove_{idx}"):
-                line_items_to_remove.append(idx)
+        if product and quantity > 0:
+            line_items.append({
+                'product': product,
+                'quantity': quantity
+            })
     
-    # Remove marked line items
-    for idx in reversed(line_items_to_remove):
-        st.session_state.line_items.pop(idx)
+    # Add/Remove item buttons
+    col1, col2 = st.columns([1, 4])
+    with col1:
+        if st.button('+ Add Item'):
+            st.session_state.item_count += 1
+            st.rerun()
     
-    if st.button('Calculate Order'):
+    # Notes section
+    st.markdown('### Notes')
+    notes = st.text_area('Order Notes', value=st.session_state.notes, height=100)
+    st.session_state.notes = notes
+    
+    # Calculate order
+    if st.button('Calculate Order', type='primary'):
         if not po_number:
-            st.error("Please enter a PO number")
+            st.error('Please enter a PO number')
             return
-            
-        if not st.session_state.line_items:
-            st.error("Please add at least one line item")
+        
+        if not line_items:
+            st.error('Please add at least one line item')
             return
-            
+        
         results = []
         total_cost = 0
         
-        # Reset order quantities
-        for product in ['ribeye', 'brisket', 'chuck_roast', 'ground_beef', 'outside_skirt', 'stew', 'short_rib']:
-            setattr(st.session_state, f"{product}_order", 0.0)
-        
-        # Set quantities from line items
-        for item in st.session_state.line_items:
-            product_key = item['product'].lower().replace(' ', '_')
-            setattr(st.session_state, f"{product_key}_order", item['quantity'])
-        
-        # Calculate results for each product
-        for item in st.session_state.line_items:
-            product = item['product']
-            quantity = item['quantity']
-            
-            if product == 'RIBEYE' and quantity > 0:
-                result = calculate_ribeye(quantity)
+        # Calculate each line item
+        for item in line_items:
+            if item['product'] == 'WF Kosher Boneless Beef Ribeye Steak' and item['quantity'] > 0:
+                result = calculate_ribeye(item['quantity'])
                 results.append(result)
                 total_cost += result['cost']
-            elif product == 'BRISKET' and quantity > 0:
-                result = calculate_brisket(quantity)
+            elif item['product'] == 'WF Kosher Boneless Beef Brisket Flat Cut' and item['quantity'] > 0:
+                result = calculate_brisket(item['quantity'])
                 results.append(result)
                 total_cost += result['cost']
-            elif product == 'CHUCK ROAST' and quantity > 0:
-                result = calculate_chuck_roast(quantity)
+            elif item['product'] == 'WF Kosher Boneless Beef Chuck Roast' and item['quantity'] > 0:
+                result = calculate_chuck_roast(item['quantity'])
                 results.append(result)
                 total_cost += result['cost']
-            elif product == 'OUTSIDE SKIRT' and quantity > 0:
-                result = calculate_outside_skirt(quantity)
+            elif item['product'] == 'WF Kosher Beef Outside Skirt Steak' and item['quantity'] > 0:
+                result = calculate_outside_skirt(item['quantity'])
                 results.append(result)
                 total_cost += result['cost']
-            elif product == 'STEW' and quantity > 0:
-                result = calculate_stew(quantity)
+            elif item['product'] == 'WF Kosher Beef Stew' and item['quantity'] > 0:
+                result = calculate_stew(item['quantity'])
                 results.append(result)
                 total_cost += result['cost']
-            elif product == 'BNLS SHORT RIB' and quantity > 0:
-                result = calculate_short_rib(quantity)
+            elif item['product'] == 'WF Kosher Boneless Beef Short Ribs' and item['quantity'] > 0:
+                result = calculate_short_rib(item['quantity'])
                 results.append(result)
                 total_cost += result['cost']
         
         # Display results
         st.markdown("---")
-        st.subheader("Order Summary")
+        st.markdown("### Order Summary")
+        
+        # Create summary table
+        summary_data = []
+        for result in results:
+            summary_data.append({
+                'Product': result['product'],
+                'Order Quantity (lbs)': f"{result['order_quantity']:.1f}",
+                'Raw Material (lbs)': f"{result['raw_material']:.1f}",
+                'Cost': f"${result['cost']:.2f}"
+            })
+            
+            # Add additional outputs if present
+            if 'additional_outputs' in result:
+                for output in result['additional_outputs']:
+                    summary_data.append({
+                        'Product': f"→ {output['product']}",
+                        'Order Quantity (lbs)': f"{output['quantity']:.1f}",
+                        'Raw Material (lbs)': '-',
+                        'Cost': '-'
+                    })
+        
+        # Display summary table
+        st.table(pd.DataFrame(summary_data))
+        st.markdown(f"**Total Estimated Cost:** ${total_cost:.2f}")
+        
+        # Create CSV for download
+        csv = pd.DataFrame(summary_data).to_csv(index=False)
+        st.download_button(
+            'Download Summary',
+            csv,
+            'order_summary.csv',
+            'text/csv'
+        )
         
         # Save order to database
         try:
-            order_data = {
+            response = supabase.table('orders').insert({
                 'po_number': po_number,
-                'order_date': datetime.now().isoformat(),
-                'line_items': st.session_state.line_items,
-                'total_cost': total_cost
-            }
-            
-            response = supabase.table('orders').insert(order_data).execute()
+                'po_date': po_date.isoformat(),
+                'delivery_date': delivery_date.isoformat(),
+                'line_items': line_items,
+                'total_cost': total_cost,
+                'notes': notes
+            }).execute()
             
             if hasattr(response, 'data'):
-                st.success(f"Order {po_number} saved successfully!")
+                st.success('Order saved successfully!')
+                st.markdown(f"View this order on the **Order Board** tab")
             else:
-                st.error("Error saving order")
-            
+                st.error('Error saving order')
         except Exception as e:
-            st.error(f"Error saving order: {str(e)}")
-        
-        # Display calculations
-        for result in results:
-            st.markdown(f"### {result['product']}")
-            st.markdown(f"**Order Quantity:** {result['order_quantity']:.1f} lbs")
-            st.markdown(f"**Raw Material Required:** {result['raw_material']:.1f} lbs")
-            st.markdown(f"**Estimated Cost:** ${result['cost']:.2f}")
-            
-            if 'additional_outputs' in result:
-                st.markdown("**Additional Outputs:**")
-                for output in result['additional_outputs']:
-                    st.markdown(f"- {output['product']}: {output['quantity']:.1f} lbs")
-        
-        st.markdown("---")
-        st.markdown(f"**Total Estimated Cost:** ${total_cost:.2f}")
+            st.error(f'Error saving order: {str(e)}')
 
 def inventory_tracking():
     st.title('Inventory Tracking')
@@ -674,14 +758,14 @@ def order_board():
     st.title('Order Board')
     st.markdown('Track and manage orders')
     
-    # Fetch orders from database
-    response = supabase.table('orders').select('*').order('order_date', desc=True).execute()
+    # Fetch orders from database, ordered by delivery date
+    response = supabase.table('orders').select('*').order('delivery_date').execute()
     
     if hasattr(response, 'data') and len(response.data) > 0:
         orders_df = pd.DataFrame(response.data)
         
         # Add filters
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
             status_filter = st.multiselect(
                 'Filter by Status',
@@ -691,6 +775,35 @@ def order_board():
         
         with col2:
             search = st.text_input('Search PO Number')
+            
+        with col3:
+            date_filter = st.selectbox(
+                'Date Filter',
+                ['All', 'Today', 'This Week', 'This Month', 'Past Due']
+            )
+        
+        # Apply date filter
+        today = pd.Timestamp.now().date()
+        if date_filter == 'Today':
+            orders_df = orders_df[pd.to_datetime(orders_df['delivery_date']).dt.date == today]
+        elif date_filter == 'This Week':
+            week_end = today + pd.Timedelta(days=7)
+            orders_df = orders_df[
+                (pd.to_datetime(orders_df['delivery_date']).dt.date >= today) &
+                (pd.to_datetime(orders_df['delivery_date']).dt.date <= week_end)
+            ]
+        elif date_filter == 'This Month':
+            month_end = (pd.Timestamp.now() + pd.offsets.MonthEnd(0)).date()
+            orders_df = orders_df[
+                (pd.to_datetime(orders_df['delivery_date']).dt.date >= today) &
+                (pd.to_datetime(orders_df['delivery_date']).dt.date <= month_end)
+            ]
+        elif date_filter == 'Past Due':
+            orders_df = orders_df[
+                (pd.to_datetime(orders_df['delivery_date']).dt.date < today) &
+                (orders_df['status'] != 'completed') &
+                (orders_df['status'] != 'cancelled')
+            ]
         
         # Filter dataframe
         filtered_df = orders_df[
@@ -700,33 +813,57 @@ def order_board():
         
         # Display orders
         for _, order in filtered_df.iterrows():
-            with st.expander(f"PO #{order['po_number']} - {order['status'].title()} - {pd.to_datetime(order['order_date']).strftime('%Y-%m-%d')}"):
-                col1, col2, col3 = st.columns(3)
+            try:
+                delivery_date = pd.to_datetime(order.get('delivery_date')).date() if order.get('delivery_date') else None
+                po_date = pd.to_datetime(order.get('po_date')).date() if order.get('po_date') else None
                 
-                with col1:
-                    st.markdown(f"**Total Cost:** ${order['total_cost']:,.2f}")
+                header = f"PO #{order['po_number']} - {order['status'].title()}"
+                if delivery_date:
+                    header += f" - Due: {delivery_date}"
+                    is_past_due = delivery_date < today and order['status'] not in ['completed', 'cancelled']
+                    if is_past_due:
+                        header = f"PAST DUE - {header}"
                 
-                with col2:
-                    st.markdown(f"**Status:** {order['status'].title()}")
-                
-                with col3:
-                    new_status = st.selectbox(
-                        'Update Status',
-                        ['pending', 'in_production', 'completed', 'cancelled'],
-                        index=['pending', 'in_production', 'completed', 'cancelled'].index(order['status']),
-                        key=f"status_{order['id']}"
-                    )
+                with st.expander(header):
+                    col1, col2, col3, col4 = st.columns(4)
                     
-                    if new_status != order['status']:
-                        if st.button('Update', key=f"update_{order['id']}"):
-                            response = supabase.table('orders').update({'status': new_status}).eq('id', order['id']).execute()
-                            if hasattr(response, 'data'):
-                                st.success('Status updated!')
-                                st.rerun()
-                
-                st.markdown("### Line Items")
-                for item in order['line_items']:
-                    st.markdown(f"- {item['product']}: {item['quantity']:,.1f} lbs")
+                    with col1:
+                        st.markdown(f"**Total Cost:** ${order['total_cost']:,.2f}")
+                    
+                    with col2:
+                        if po_date:
+                            st.markdown(f"**PO Date:** {po_date}")
+                        else:
+                            st.markdown("**PO Date:** Not set")
+                    
+                    with col3:
+                        st.markdown(f"**Status:** {order['status'].title()}")
+                    
+                    with col4:
+                        new_status = st.selectbox(
+                            'Update Status',
+                            ['pending', 'in_production', 'completed', 'cancelled'],
+                            index=['pending', 'in_production', 'completed', 'cancelled'].index(order['status']),
+                            key=f"status_{order['id']}"
+                        )
+                        
+                        if new_status != order['status']:
+                            if st.button('Update', key=f"update_{order['id']}"):
+                                response = supabase.table('orders').update({'status': new_status}).eq('id', order['id']).execute()
+                                if hasattr(response, 'data'):
+                                    st.success('Status updated!')
+                                    st.rerun()
+                    
+                    st.markdown("### Line Items")
+                    for item in order['line_items']:
+                        st.markdown(f"- {item['product']}: {item['quantity']:,.1f} lbs")
+                    
+                    if order.get('notes'):
+                        st.markdown("### Notes")
+                        st.markdown(order['notes'])
+            except Exception as e:
+                st.error(f"Error displaying order {order.get('po_number', 'Unknown')}: {str(e)}")
+                continue
     else:
         st.info("No orders found")
 
@@ -752,7 +889,7 @@ if page == 'Calculator':
             step=1, 
             value=0
         )
-        order_inputs['WF Kosher Boneless Beef Outside Skirt Steak'] = st.number_input(
+        order_inputs['WF Kosher Beef Outside Skirt Steak'] = st.number_input(
             'Outside Skirt Steak (cases)', 
             min_value=0, 
             step=1, 
