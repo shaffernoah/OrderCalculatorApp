@@ -1,3 +1,8 @@
+-- Drop existing triggers first
+drop trigger if exists update_inventory_purchases_updated_at on inventory_purchases;
+drop trigger if exists update_inventory_after_purchase on inventory_purchases;
+drop trigger if exists update_inventory_after_production on production;
+
 -- Create inventory table if it doesn't exist
 create table if not exists inventory (
     id uuid default uuid_generate_v4() primary key,
@@ -19,6 +24,14 @@ create table if not exists inventory_purchases (
     invoice_number text not null,
     created_at timestamp with time zone default now(),
     updated_at timestamp with time zone default now()
+);
+
+-- Create production table if it doesn't exist
+create table if not exists production (
+    id uuid default uuid_generate_v4() primary key,
+    input_material text not null references inventory(material),
+    input_quantity numeric not null,
+    created_at timestamp with time zone default now()
 );
 
 -- Create an updated_at trigger
@@ -62,6 +75,39 @@ create trigger update_inventory_after_purchase
     after insert on inventory_purchases
     for each row
     execute function update_inventory_quantity();
+
+-- Create trigger to update inventory quantities from production
+create or replace function update_inventory_from_production()
+returns trigger as $$
+begin
+    -- Subtract the input quantity from inventory
+    update inventory
+    set 
+        quantity = quantity - NEW.input_quantity,
+        last_updated = now()
+    where material = NEW.input_material;
+    
+    -- Raise an error if inventory would go negative
+    if not found or (
+        select quantity < 0 
+        from inventory 
+        where material = NEW.input_material
+    ) then
+        raise exception 'Insufficient inventory for material: %', NEW.input_material;
+    end if;
+    
+    return NEW;
+end;
+$$ language plpgsql;
+
+-- Drop existing trigger if it exists
+drop trigger if exists update_inventory_after_production on production;
+
+-- Create trigger for production table
+create trigger update_inventory_after_production
+    after insert on production
+    for each row
+    execute function update_inventory_from_production();
 
 -- Initialize inventory with unique materials
 insert into inventory (material, quantity)
@@ -144,6 +190,39 @@ left join lateral (
     select price_per_lb, purchase_date
     from inventory_purchases ip
     where ip.material = i.material
+    order by purchase_date desc
+    limit 1
+) latest_purchase on true;
+
+-- Create view that shows current inventory with production usage
+create or replace view inventory_with_usage as
+select 
+    i.material,
+    i.quantity as current_quantity,
+    i.last_updated,
+    coalesce(p.total_used, 0) as quantity_used_in_production,
+    coalesce(ip.total_purchased, 0) as total_purchased,
+    latest_purchase.price_per_lb as last_purchase_price,
+    latest_purchase.purchase_date as last_purchase_date
+from inventory i
+left join (
+    select 
+        input_material,
+        sum(input_quantity) as total_used
+    from production
+    group by input_material
+) p on p.input_material = i.material
+left join (
+    select 
+        material,
+        sum(quantity) as total_purchased
+    from inventory_purchases
+    group by material
+) ip on ip.material = i.material
+left join lateral (
+    select price_per_lb, purchase_date
+    from inventory_purchases
+    where material = i.material
     order by purchase_date desc
     limit 1
 ) latest_purchase on true;

@@ -401,21 +401,35 @@ def inventory_tracking():
             material = st.selectbox('Raw Material', ['RIBEYE', 'BRISKET', '2PC CHUCK', 'OUTSIDE SKIRT'])
             quantity = st.number_input('Quantity (lbs)', min_value=0.0, step=0.1, value=0.0)
             cost = st.number_input('Total Cost ($)', min_value=0.0, step=0.1, value=0.0)
+            invoice_number = st.text_input('Invoice Number')
+            purchase_date = st.date_input('Purchase Date', value=datetime.now())
             submitted = st.form_submit_button('Add Purchase Record')
             
             if submitted:
-                data = {
-                    'material': material,
-                    'quantity': quantity,
-                    'cost': cost,
-                    'date': datetime.now().isoformat(),
-                    'transaction_type': 'purchase'
-                }
-                response = supabase.table('inventory').insert(data).execute()
-                if hasattr(response, 'data'):
-                    st.success('Purchase record added successfully')
+                if quantity > 0 and cost > 0:
+                    # Calculate price per pound
+                    price_per_lb = cost / quantity if quantity > 0 else 0
+                    
+                    data = {
+                        'material': material,
+                        'quantity': quantity,
+                        'cost': cost,
+                        'purchase_date': purchase_date.isoformat(),
+                        'transaction_type': 'purchase',
+                        'price_per_lb': price_per_lb,
+                        'invoice_number': invoice_number
+                    }
+                    
+                    try:
+                        response = supabase.table('inventory_purchases').insert(data).execute()
+                        if hasattr(response, 'data'):
+                            st.success('Purchase record added successfully')
+                        else:
+                            st.error('Error adding purchase record')
+                    except Exception as e:
+                        st.error(f'Error adding purchase record: {str(e)}')
                 else:
-                    st.error('Error adding purchase record')
+                    st.error('Quantity and cost must be greater than 0')
     
     with tab2:
         st.subheader("Upload Invoice PDF")
@@ -615,12 +629,12 @@ def inventory_tracking():
                             'quantity': item['quantity'],
                             'price_per_lb': item['price_per_lb'],
                             'cost': item['total'],
-                            'date': invoice_date.isoformat(),
+                            'purchase_date': invoice_date.isoformat(),
                             'invoice_number': invoice_number,
                             'transaction_type': 'purchase'
                         }
                         
-                        response = supabase.table('inventory').insert(data).execute()
+                        response = supabase.table('inventory_purchases').insert(data).execute()
                         
                         if hasattr(response, 'data'):
                             st.success(f'Successfully saved {item["product"]} purchase record')
@@ -632,10 +646,7 @@ def inventory_tracking():
                     'file_name': uploaded_file.name,
                     'file_path': file_path,
                     'doc_type': 'invoice',
-                    'upload_date': datetime.now().isoformat(),
-                    'invoice_number': invoice_number,
-                    'invoice_date': invoice_date.isoformat() if invoice_date else None,
-                    'extracted_text': extracted_text
+                    'upload_date': datetime.now().isoformat()
                 }
                 supabase.table('documents').insert(doc_data).execute()
                 
@@ -731,16 +742,17 @@ def inventory_tracking():
             
             if submitted:
                 if input_quantity > 0 and output_quantity > 0:
-                    yield_rate = output_quantity / input_quantity
+                    yield_value = output_quantity / input_quantity
                     
                     # Record production
                     prod_data = {
+                        'po_number': po_number,
                         'product': product,
                         'input_material': input_material,
                         'input_quantity': input_quantity,
                         'output_quantity': output_quantity,
-                        'yield': yield_rate,
-                        'date': datetime.now().isoformat()
+                        'yield': yield_value,
+                        'created_at': datetime.now().isoformat()
                     }
                     
                     # Update inventory
@@ -753,7 +765,7 @@ def inventory_tracking():
                     }
                     
                     response1 = supabase.table('production').insert(prod_data).execute()
-                    response2 = supabase.table('inventory').insert(inv_data).execute()
+                    response2 = supabase.table('inventory_purchases').insert(inv_data).execute()
                     
                     if hasattr(response1, 'data') and hasattr(response2, 'data'):
                         st.success('Production record added successfully')
@@ -770,94 +782,85 @@ def display_dashboard():
     tab1, tab2 = st.tabs(["Current Inventory", "Production Metrics"])
     
     with tab1:
-        # Fetch current inventory data
-        inventory_query = """
-        select 
-            i.material,
-            i.quantity as current_quantity,
-            i.last_updated,
-            latest_purchase.price_per_lb as last_purchase_price,
-            latest_purchase.purchase_date as last_purchase_date,
-            latest_purchase.invoice_number as last_invoice
-        from inventory i
-        left join lateral (
-            select price_per_lb, purchase_date, invoice_number
-            from inventory_purchases ip
-            where ip.material = i.material
-            order by purchase_date desc
-            limit 1
-        ) latest_purchase on true
-        order by i.material;
-        """
-        
-        inventory = supabase.table('inventory').select("*").execute()
+        # Fetch current inventory data with usage
+        inventory_data = supabase.table('inventory_with_usage').select("*").execute()
         purchases = supabase.table('inventory_purchases').select("*").execute()
         
-        if hasattr(inventory, 'data') and len(inventory.data) > 0:
-            inventory_df = pd.DataFrame(inventory.data)
+        if hasattr(inventory_data, 'data') and len(inventory_data.data) > 0:
+            inventory_df = pd.DataFrame(inventory_data.data)
             purchases_df = pd.DataFrame(purchases.data) if hasattr(purchases, 'data') else pd.DataFrame()
-            
-            # Calculate metrics for each material
-            if not purchases_df.empty:
-                recent_purchases = purchases_df.sort_values('purchase_date').groupby('material').last()
-                inventory_df = inventory_df.merge(
-                    recent_purchases[['price_per_lb', 'purchase_date', 'invoice_number']], 
-                    on='material', 
-                    how='left'
-                )
             
             # Display current inventory levels
             st.subheader("Current Inventory Levels")
             
-            # Create metrics for total inventory value
-            total_value = (inventory_df['quantity'] * inventory_df['price_per_lb']).sum()
-            total_quantity = inventory_df['quantity'].sum()
+            # Create metrics for total inventory value and movement
+            total_value = (inventory_df['current_quantity'] * inventory_df['last_purchase_price']).sum()
+            total_quantity = inventory_df['current_quantity'].sum()
+            total_used = inventory_df['quantity_used_in_production'].sum()
             
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric("Total Inventory Value", f"${total_value:,.2f}")
             with col2:
                 st.metric("Total Quantity", f"{total_quantity:,.1f} lbs")
+            with col3:
+                st.metric("Total Used in Production", f"{total_used:,.1f} lbs")
             
             # Display inventory table
             st.markdown("### Inventory Details")
             display_df = inventory_df.copy()
-            display_df['Current Value'] = display_df['quantity'] * display_df['price_per_lb']
+            display_df['Current Value'] = display_df['current_quantity'] * display_df['last_purchase_price']
             display_df['Last Updated'] = pd.to_datetime(display_df['last_updated']).dt.strftime('%Y-%m-%d %H:%M')
-            display_df['Last Purchase'] = pd.to_datetime(display_df['purchase_date']).dt.strftime('%Y-%m-%d')
+            display_df['Last Purchase'] = pd.to_datetime(display_df['last_purchase_date']).dt.strftime('%Y-%m-%d')
             
             # Format the display dataframe
             display_df = display_df[[
-                'material', 'quantity', 'price_per_lb', 'Current Value', 
-                'Last Updated', 'Last Purchase', 'invoice_number'
+                'material', 'current_quantity', 'quantity_used_in_production', 
+                'total_purchased', 'last_purchase_price', 'Current Value', 
+                'Last Updated', 'Last Purchase'
             ]].rename(columns={
                 'material': 'Material',
-                'quantity': 'Quantity (lbs)',
-                'price_per_lb': 'Price/lb ($)',
-                'invoice_number': 'Last Invoice'
+                'current_quantity': 'Current Quantity (lbs)',
+                'quantity_used_in_production': 'Used in Production (lbs)',
+                'total_purchased': 'Total Purchased (lbs)',
+                'last_purchase_price': 'Price/lb ($)'
             })
             
             # Format numeric columns
-            display_df['Quantity (lbs)'] = display_df['Quantity (lbs)'].apply(lambda x: f"{x:,.1f}")
+            display_df['Current Quantity (lbs)'] = display_df['Current Quantity (lbs)'].apply(lambda x: f"{x:,.1f}")
+            display_df['Used in Production (lbs)'] = display_df['Used in Production (lbs)'].apply(lambda x: f"{x:,.1f}")
+            display_df['Total Purchased (lbs)'] = display_df['Total Purchased (lbs)'].apply(lambda x: f"{x:,.1f}")
             display_df['Price/lb ($)'] = display_df['Price/lb ($)'].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "N/A")
             display_df['Current Value'] = display_df['Current Value'].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "N/A")
             
             st.dataframe(display_df, hide_index=True)
             
-            # Create a bar chart of inventory levels
-            st.markdown("### Inventory Visualization")
-            chart_data = inventory_df[['material', 'quantity']].copy()
+            # Create a bar chart comparing current inventory vs used in production
+            st.markdown("### Inventory Usage Visualization")
+            chart_data = pd.melt(
+                inventory_df[['material', 'current_quantity', 'quantity_used_in_production']], 
+                id_vars=['material'],
+                value_vars=['current_quantity', 'quantity_used_in_production'],
+                var_name='Metric',
+                value_name='Quantity'
+            )
+            
+            chart_data['Metric'] = chart_data['Metric'].map({
+                'current_quantity': 'Current Inventory',
+                'quantity_used_in_production': 'Used in Production'
+            })
             
             inventory_chart = alt.Chart(chart_data).mark_bar().encode(
-                x=alt.X('material:N', title='Material', sort='-y'),
-                y=alt.Y('quantity:Q', title='Quantity (lbs)'),
-                color='material:N',
+                x=alt.X('material:N', title='Material'),
+                y=alt.Y('Quantity:Q', title='Quantity (lbs)'),
+                color='Metric:N',
                 tooltip=[
                     alt.Tooltip('material:N', title='Material'),
-                    alt.Tooltip('quantity:Q', title='Quantity (lbs)', format=',.1f')
+                    alt.Tooltip('Metric:N', title='Metric'),
+                    alt.Tooltip('Quantity:Q', title='Quantity (lbs)', format=',.1f')
                 ]
             ).properties(
-                title='Current Inventory Levels by Material',
+                title='Current Inventory vs Production Usage by Material',
                 width=800,
                 height=400
             ).interactive()
