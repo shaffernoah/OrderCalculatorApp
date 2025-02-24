@@ -394,7 +394,7 @@ def inventory_tracking():
     st.title('Inventory Tracking')
     st.markdown('Record raw material orders and production records below.')
     
-    tab1, tab2, tab3, tab4 = st.tabs(["Raw Material Purchase", "Upload Invoice", "Production Record", "Document Management"])
+    tab1, tab2, tab3 = st.tabs(["Raw Material Purchase", "Upload Invoice", "Production Record"])
     
     with tab1:
         with st.form('inventory_purchase_form'):
@@ -676,61 +676,6 @@ def inventory_tracking():
                 except Exception as sys_e:
                     st.error(f"Error getting system information: {str(sys_e)}")
     
-    with tab4:
-        st.subheader("Document Management")
-        
-        # Document filters
-        col1, col2 = st.columns(2)
-        with col1:
-            doc_type_filter = st.selectbox(
-                "Document Type",
-                ["All", "Invoice", "Production Record", "Other"],
-                key="doc_type_filter"
-            )
-        with col2:
-            date_filter = st.date_input(
-                "Date Filter",
-                value=(datetime.now() - timedelta(days=30), datetime.now()),
-                key="date_filter"
-            )
-        
-        # Fetch documents from database
-        query = supabase.table('documents').select('*')
-        if doc_type_filter != "All":
-            query = query.eq('doc_type', doc_type_filter.lower())
-        if len(date_filter) == 2:
-            query = query.gte('upload_date', date_filter[0].isoformat()).lte('upload_date', date_filter[1].isoformat())
-        
-        documents = query.execute()
-        
-        if not documents.data:
-            st.info("No documents found matching the criteria")
-        else:
-            for doc in documents.data:
-                with st.expander(f"{doc['file_name']} - {doc['upload_date'][:10]}"):
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        st.text(f"Document Type: {doc['doc_type'].title()}")
-                        if doc['doc_type'] == 'invoice':
-                            st.text(f"Invoice Number: {doc['invoice_number']}")
-                            st.text(f"Invoice Date: {doc['invoice_date'][:10] if doc['invoice_date'] else 'N/A'}")
-                        
-                        # Show extracted text directly without nested expander
-                        if doc.get('extracted_text'):
-                            st.markdown("**Extracted Text:**")
-                            st.text_area("", value=doc['extracted_text'], height=200, key=f"text_{doc['id']}", disabled=True)
-                    
-                    with col2:
-                        # Generate temporary URL for download
-                        try:
-                            download_url = supabase.storage.from_("documents").create_signed_url(
-                                doc['file_path'],
-                                60  # URL valid for 60 seconds
-                            )
-                            st.markdown(f"[Download Document]({download_url['signedURL']})")
-                        except Exception as e:
-                            st.error("Error generating download link")
-    
     with tab3:
         with st.form('production_record_form'):
             product = st.selectbox('Product', list(products.keys()))
@@ -775,8 +720,11 @@ def inventory_tracking():
                     st.error('Input and output quantities must be greater than 0')
 
 def display_dashboard():
-    st.title('Dashboard')
-    st.markdown('Overview of inventory, purchases, and production metrics.')
+    st.title('Order Calculator Dashboard')
+    st.markdown("""
+    Welcome to your Order Calculator Dashboard! Here you can monitor your inventory levels, 
+    track production metrics, and view purchase history. Use the sidebar to navigate to other features.
+    """)
     
     # Create tabs for different dashboard sections
     tab1, tab2 = st.tabs(["Current Inventory", "Production Metrics"])
@@ -1070,10 +1018,16 @@ def order_board():
 
 # Sidebar Navigation
 st.sidebar.title('Order Calculator App')
-page = st.sidebar.radio('Select Page', ['Calculator', 'Inventory Tracking', 'Dashboard', 'Order Planning', 'Order Board'])
+page = st.sidebar.radio(
+    'Navigation',
+    ['Dashboard', 'Calculator', 'Inventory Tracking', 'Order Planning', 'Order Board'],
+    index=0  # Make Dashboard the default selected option
+)
 
 # Page routing
-if page == 'Calculator':
+if page == 'Dashboard':
+    display_dashboard()
+elif page == 'Calculator':
     st.title('Order Calculator')
     st.markdown('Enter purchase order cases and existing raw materials inventory below.')
     
@@ -1229,9 +1183,6 @@ if page == 'Calculator':
 
 elif page == 'Inventory Tracking':
     inventory_tracking()
-    
-elif page == 'Dashboard':
-    display_dashboard()
     
 elif page == 'Order Planning':
     order_planning()
