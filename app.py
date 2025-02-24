@@ -394,7 +394,7 @@ def inventory_tracking():
     st.title('Inventory Tracking')
     st.markdown('Record raw material orders and production records below.')
     
-    tab1, tab2, tab3 = st.tabs(["Raw Material Purchase", "Upload Invoice", "Production Record"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Raw Material Purchase", "Upload Invoice", "Production Record", "Document Management"])
     
     with tab1:
         with st.form('inventory_purchase_form'):
@@ -419,7 +419,7 @@ def inventory_tracking():
     
     with tab2:
         st.subheader("Upload Invoice PDF")
-        uploaded_file = st.file_uploader("Choose a PDF file", type="pdf")
+        uploaded_file = st.file_uploader("Choose a PDF file", type="pdf", key="invoice_upload")
         
         if uploaded_file is not None:
             try:
@@ -430,6 +430,12 @@ def inventory_tracking():
                 with open(temp_path, "wb") as f:
                     f.write(uploaded_file.getvalue())
                 
+                # Store PDF in Supabase storage
+                file_path = f"invoices/{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uploaded_file.name}"
+                with open(temp_path, "rb") as f:
+                    supabase.storage.from_("documents").upload(file_path, f)
+                
+                # Continue with existing PDF processing code
                 # Use absolute path to Poppler
                 poppler_path = "/opt/homebrew/Cellar/poppler/25.02.0/bin"
                 st.success(f"Using Poppler at: {poppler_path}")
@@ -621,6 +627,18 @@ def inventory_tracking():
                         else:
                             st.error(f'Error saving {item["product"]} purchase record')
 
+                # After successful processing, store document metadata in the database
+                doc_data = {
+                    'file_name': uploaded_file.name,
+                    'file_path': file_path,
+                    'doc_type': 'invoice',
+                    'upload_date': datetime.now().isoformat(),
+                    'invoice_number': invoice_number,
+                    'invoice_date': invoice_date.isoformat() if invoice_date else None,
+                    'extracted_text': extracted_text
+                }
+                supabase.table('documents').insert(doc_data).execute()
+                
                 # Cleanup temporary files
                 os.remove(temp_path)
                 os.rmdir(temp_dir)
@@ -646,6 +664,61 @@ def inventory_tracking():
                     """)
                 except Exception as sys_e:
                     st.error(f"Error getting system information: {str(sys_e)}")
+    
+    with tab4:
+        st.subheader("Document Management")
+        
+        # Document filters
+        col1, col2 = st.columns(2)
+        with col1:
+            doc_type_filter = st.selectbox(
+                "Document Type",
+                ["All", "Invoice", "Production Record", "Other"],
+                key="doc_type_filter"
+            )
+        with col2:
+            date_filter = st.date_input(
+                "Date Filter",
+                value=(datetime.now() - timedelta(days=30), datetime.now()),
+                key="date_filter"
+            )
+        
+        # Fetch documents from database
+        query = supabase.table('documents').select('*')
+        if doc_type_filter != "All":
+            query = query.eq('doc_type', doc_type_filter.lower())
+        if len(date_filter) == 2:
+            query = query.gte('upload_date', date_filter[0].isoformat()).lte('upload_date', date_filter[1].isoformat())
+        
+        documents = query.execute()
+        
+        if not documents.data:
+            st.info("No documents found matching the criteria")
+        else:
+            for doc in documents.data:
+                with st.expander(f"{doc['file_name']} - {doc['upload_date'][:10]}"):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.text(f"Document Type: {doc['doc_type'].title()}")
+                        if doc['doc_type'] == 'invoice':
+                            st.text(f"Invoice Number: {doc['invoice_number']}")
+                            st.text(f"Invoice Date: {doc['invoice_date'][:10] if doc['invoice_date'] else 'N/A'}")
+                        
+                        # Show extracted text directly without nested expander
+                        if doc.get('extracted_text'):
+                            st.markdown("**Extracted Text:**")
+                            st.text_area("", value=doc['extracted_text'], height=200, key=f"text_{doc['id']}", disabled=True)
+                    
+                    with col2:
+                        # Generate temporary URL for download
+                        try:
+                            download_url = supabase.storage.from_("documents").create_signed_url(
+                                doc['file_path'],
+                                60  # URL valid for 60 seconds
+                            )
+                            st.markdown(f"[Download Document]({download_url['signedURL']})")
+                        except Exception as e:
+                            st.error("Error generating download link")
     
     with tab3:
         with st.form('production_record_form'):
@@ -691,68 +764,193 @@ def inventory_tracking():
 
 def display_dashboard():
     st.title('Dashboard')
-    st.markdown('Overview of order history and production metrics.')
+    st.markdown('Overview of inventory, purchases, and production metrics.')
     
-    # Fetch data from Supabase
-    production = supabase.table('production').select("*").execute()
+    # Create tabs for different dashboard sections
+    tab1, tab2 = st.tabs(["Current Inventory", "Production Metrics"])
     
-    if hasattr(production, 'data') and len(production.data) > 0:
-        production_df = pd.DataFrame(production.data)
+    with tab1:
+        # Fetch current inventory data
+        inventory_query = """
+        select 
+            i.material,
+            i.quantity as current_quantity,
+            i.last_updated,
+            latest_purchase.price_per_lb as last_purchase_price,
+            latest_purchase.purchase_date as last_purchase_date,
+            latest_purchase.invoice_number as last_invoice
+        from inventory i
+        left join lateral (
+            select price_per_lb, purchase_date, invoice_number
+            from inventory_purchases ip
+            where ip.material = i.material
+            order by purchase_date desc
+            limit 1
+        ) latest_purchase on true
+        order by i.material;
+        """
         
-        # Sort by PO number
-        def extract_po_number(po):
-            if pd.isna(po):
-                return float('inf')  # Put NaN values at the end
-            match = re.search(r'(\d+)', str(po))
-            return float('inf') if match is None else int(match.group(1))
+        inventory = supabase.table('inventory').select("*").execute()
+        purchases = supabase.table('inventory_purchases').select("*").execute()
         
-        production_df = production_df.sort_values(by='po_number', key=lambda x: x.map(extract_po_number))
+        if hasattr(inventory, 'data') and len(inventory.data) > 0:
+            inventory_df = pd.DataFrame(inventory.data)
+            purchases_df = pd.DataFrame(purchases.data) if hasattr(purchases, 'data') else pd.DataFrame()
+            
+            # Calculate metrics for each material
+            if not purchases_df.empty:
+                recent_purchases = purchases_df.sort_values('purchase_date').groupby('material').last()
+                inventory_df = inventory_df.merge(
+                    recent_purchases[['price_per_lb', 'purchase_date', 'invoice_number']], 
+                    on='material', 
+                    how='left'
+                )
+            
+            # Display current inventory levels
+            st.subheader("Current Inventory Levels")
+            
+            # Create metrics for total inventory value
+            total_value = (inventory_df['quantity'] * inventory_df['price_per_lb']).sum()
+            total_quantity = inventory_df['quantity'].sum()
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric("Total Inventory Value", f"${total_value:,.2f}")
+            with col2:
+                st.metric("Total Quantity", f"{total_quantity:,.1f} lbs")
+            
+            # Display inventory table
+            st.markdown("### Inventory Details")
+            display_df = inventory_df.copy()
+            display_df['Current Value'] = display_df['quantity'] * display_df['price_per_lb']
+            display_df['Last Updated'] = pd.to_datetime(display_df['last_updated']).dt.strftime('%Y-%m-%d %H:%M')
+            display_df['Last Purchase'] = pd.to_datetime(display_df['purchase_date']).dt.strftime('%Y-%m-%d')
+            
+            # Format the display dataframe
+            display_df = display_df[[
+                'material', 'quantity', 'price_per_lb', 'Current Value', 
+                'Last Updated', 'Last Purchase', 'invoice_number'
+            ]].rename(columns={
+                'material': 'Material',
+                'quantity': 'Quantity (lbs)',
+                'price_per_lb': 'Price/lb ($)',
+                'invoice_number': 'Last Invoice'
+            })
+            
+            # Format numeric columns
+            display_df['Quantity (lbs)'] = display_df['Quantity (lbs)'].apply(lambda x: f"{x:,.1f}")
+            display_df['Price/lb ($)'] = display_df['Price/lb ($)'].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "N/A")
+            display_df['Current Value'] = display_df['Current Value'].apply(lambda x: f"${x:,.2f}" if pd.notnull(x) else "N/A")
+            
+            st.dataframe(display_df, hide_index=True)
+            
+            # Create a bar chart of inventory levels
+            st.markdown("### Inventory Visualization")
+            chart_data = inventory_df[['material', 'quantity']].copy()
+            
+            inventory_chart = alt.Chart(chart_data).mark_bar().encode(
+                x=alt.X('material:N', title='Material', sort='-y'),
+                y=alt.Y('quantity:Q', title='Quantity (lbs)'),
+                color='material:N',
+                tooltip=[
+                    alt.Tooltip('material:N', title='Material'),
+                    alt.Tooltip('quantity:Q', title='Quantity (lbs)', format=',.1f')
+                ]
+            ).properties(
+                title='Current Inventory Levels by Material',
+                width=800,
+                height=400
+            ).interactive()
+            
+            st.altair_chart(inventory_chart)
+            
+            # Display recent purchase history
+            if not purchases_df.empty:
+                st.markdown("### Recent Purchases")
+                recent_purchases = purchases_df.sort_values('purchase_date', ascending=False).head(10)
+                recent_purchases['purchase_date'] = pd.to_datetime(recent_purchases['purchase_date']).dt.strftime('%Y-%m-%d')
+                recent_purchases['price_per_lb'] = recent_purchases['price_per_lb'].apply(lambda x: f"${x:,.2f}")
+                recent_purchases['cost'] = recent_purchases['cost'].apply(lambda x: f"${x:,.2f}")
+                recent_purchases['quantity'] = recent_purchases['quantity'].apply(lambda x: f"{x:,.1f}")
+                
+                st.dataframe(
+                    recent_purchases[[
+                        'purchase_date', 'material', 'quantity', 'price_per_lb', 
+                        'cost', 'invoice_number'
+                    ]].rename(columns={
+                        'purchase_date': 'Date',
+                        'material': 'Material',
+                        'quantity': 'Quantity (lbs)',
+                        'price_per_lb': 'Price/lb',
+                        'cost': 'Total Cost',
+                        'invoice_number': 'Invoice #'
+                    }),
+                    hide_index=True
+                )
+        else:
+            st.info("No inventory data available")
+    
+    with tab2:
+        # Fetch production data
+        production = supabase.table('production').select("*").execute()
         
-        # Display metrics
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            avg_yield = production_df['yield'].mean()
-            st.metric("Average Yield", f"{avg_yield:.1%}")
-        
-        with col2:
-            total_input = production_df['input_quantity'].sum()
-            st.metric("Total Input (lbs)", f"{total_input:,.0f}")
-        
-        with col3:
-            total_output = production_df['output_quantity'].sum()
-            st.metric("Total Output (lbs)", f"{total_output:,.0f}")
-        
-        # Yield trends
-        st.subheader('Yield Trends')
-        yield_chart = alt.Chart(production_df).mark_line(point=True).encode(
-            x=alt.X('po_number:N', title='PO Number'),
-            y=alt.Y('yield:Q', title='Yield %', scale=alt.Scale(domain=[0, 1])),
-            color=alt.Color('product:N', title='Product'),
-            tooltip=['po_number', 'product', 
-                    alt.Tooltip('yield:Q', format='.1%'),
-                    alt.Tooltip('input_quantity:Q', format=',.1f', title='Input (lbs)'),
-                    alt.Tooltip('output_quantity:Q', format=',.1f', title='Output (lbs)')]
-        ).properties(
-            title='Yield Trends by Product',
-            width=800,
-            height=400
-        ).interactive()
-        
-        st.altair_chart(yield_chart)
-        
-        # Display detailed data table
-        st.subheader('Production Details')
-        display_df = production_df.copy()
-        display_df['yield'] = display_df['yield'].apply(lambda x: f"{x:.1%}")
-        display_df['input_quantity'] = display_df['input_quantity'].apply(lambda x: f"{x:,.1f}")
-        display_df['output_quantity'] = display_df['output_quantity'].apply(lambda x: f"{x:,.1f}")
-        st.dataframe(
-            display_df[['po_number', 'product', 'input_material', 'input_quantity', 'output_quantity', 'yield']],
-            hide_index=True
-        )
-    else:
-        st.info("No production data available")
+        if hasattr(production, 'data') and len(production.data) > 0:
+            production_df = pd.DataFrame(production.data)
+            
+            # Sort by PO number
+            def extract_po_number(po):
+                if pd.isna(po):
+                    return float('inf')  # Put NaN values at the end
+                match = re.search(r'(\d+)', str(po))
+                return float('inf') if match is None else int(match.group(1))
+            
+            production_df = production_df.sort_values(by='po_number', key=lambda x: x.map(extract_po_number))
+            
+            # Display metrics
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                avg_yield = production_df['yield'].mean()
+                st.metric("Average Yield", f"{avg_yield:.1%}")
+            
+            with col2:
+                total_input = production_df['input_quantity'].sum()
+                st.metric("Total Input (lbs)", f"{total_input:,.0f}")
+            
+            with col3:
+                total_output = production_df['output_quantity'].sum()
+                st.metric("Total Output (lbs)", f"{total_output:,.0f}")
+            
+            # Yield trends
+            st.subheader('Yield Trends')
+            yield_chart = alt.Chart(production_df).mark_line(point=True).encode(
+                x=alt.X('po_number:N', title='PO Number'),
+                y=alt.Y('yield:Q', title='Yield %', scale=alt.Scale(domain=[0, 1])),
+                color=alt.Color('product:N', title='Product'),
+                tooltip=['po_number', 'product', 
+                        alt.Tooltip('yield:Q', format='.1%'),
+                        alt.Tooltip('input_quantity:Q', format=',.1f', title='Input (lbs)'),
+                        alt.Tooltip('output_quantity:Q', format=',.1f', title='Output (lbs)')]
+            ).properties(
+                title='Yield Trends by Product',
+                width=800,
+                height=400
+            ).interactive()
+            
+            st.altair_chart(yield_chart)
+            
+            # Display detailed data table
+            st.subheader('Production Details')
+            display_df = production_df.copy()
+            display_df['yield'] = display_df['yield'].apply(lambda x: f"{x:.1%}")
+            display_df['input_quantity'] = display_df['input_quantity'].apply(lambda x: f"{x:,.1f}")
+            display_df['output_quantity'] = display_df['output_quantity'].apply(lambda x: f"{x:,.1f}")
+            st.dataframe(
+                display_df[['po_number', 'product', 'input_material', 'input_quantity', 'output_quantity', 'yield']],
+                hide_index=True
+            )
+        else:
+            st.info("No production data available")
 
 def order_board():
     st.title('Order Board')
@@ -874,7 +1072,7 @@ page = st.sidebar.radio('Select Page', ['Calculator', 'Inventory Tracking', 'Das
 # Page routing
 if page == 'Calculator':
     st.title('Order Calculator')
-    st.markdown('Enter purchase order cases and existing raw materials inventory below')
+    st.markdown('Enter purchase order cases and existing raw materials inventory below.')
     
     # Create three columns for different product categories
     col1, col2, col3 = st.columns(3)
