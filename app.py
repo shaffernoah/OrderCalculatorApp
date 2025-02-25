@@ -91,86 +91,86 @@ products = {
     }
 }
 
-def calculate_ribeye(quantity):
+def calculate_ribeye(quantity_cases):
     info = products['WF Kosher Boneless Beef Ribeye Steak']
-    raw_material = quantity / info['yield']
+    # Convert cases to pounds using average case weight
+    quantity_lbs = quantity_cases * info['avg_case_weight']
+    raw_material = quantity_lbs / info['yield']
     cost = raw_material * info['production_cost']
     return {
         'product': 'RIBEYE',
-        'order_quantity': quantity,
+        'order_quantity_cases': quantity_cases,
+        'order_quantity_lbs': quantity_lbs,
         'raw_material': raw_material,
         'cost': cost
     }
 
-def calculate_brisket(quantity):
+def calculate_brisket(quantity_cases):
     info = products['WF Kosher Boneless Beef Brisket Flat Cut']
-    raw_material = quantity / info['yield']
+    # Convert cases to pounds using average case weight
+    quantity_lbs = quantity_cases * info['avg_case_weight']
+    raw_material = quantity_lbs / info['yield']
     cost = raw_material * info['production_cost']
-    additional_outputs = []
-    if 'related_yields' in info:
-        for output, yield_rate in info['related_yields'].items():
-            output_quantity = raw_material * yield_rate
-            additional_outputs.append({
-                'product': output,
-                'quantity': output_quantity
-            })
     return {
         'product': 'BRISKET',
-        'order_quantity': quantity,
+        'order_quantity_cases': quantity_cases,
+        'order_quantity_lbs': quantity_lbs,
         'raw_material': raw_material,
-        'cost': cost,
-        'additional_outputs': additional_outputs
+        'cost': cost
     }
 
-def calculate_chuck_roast(quantity):
+def calculate_chuck_roast(quantity_cases):
     info = products['WF Kosher Boneless Beef Chuck Roast']
-    raw_material = quantity / info['yield']
+    # Convert cases to pounds using average case weight
+    quantity_lbs = quantity_cases * info['avg_case_weight']
+    raw_material = quantity_lbs / info['yield']
     cost = raw_material * info['production_cost']
-    additional_outputs = []
-    if 'related_yields' in info:
-        for output, yield_rate in info['related_yields'].items():
-            output_quantity = raw_material * yield_rate
-            additional_outputs.append({
-                'product': output,
-                'quantity': output_quantity
-            })
     return {
         'product': 'CHUCK ROAST',
-        'order_quantity': quantity,
+        'order_quantity_cases': quantity_cases,
+        'order_quantity_lbs': quantity_lbs,
         'raw_material': raw_material,
-        'cost': cost,
-        'additional_outputs': additional_outputs
+        'cost': cost
     }
 
-def calculate_outside_skirt(quantity):
+def calculate_outside_skirt(quantity_cases):
     info = products['WF Kosher Beef Outside Skirt Steak']
-    raw_material = quantity / info['yield']
+    # Convert cases to pounds using average case weight
+    quantity_lbs = quantity_cases * info['avg_case_weight']
+    raw_material = quantity_lbs / info['yield']
     cost = raw_material * info['production_cost']
     return {
         'product': 'OUTSIDE SKIRT',
-        'order_quantity': quantity,
+        'order_quantity_cases': quantity_cases,
+        'order_quantity_lbs': quantity_lbs,
         'raw_material': raw_material,
         'cost': cost
     }
 
-def calculate_stew(quantity):
+def calculate_stew(quantity_cases):
     info = products['WF Kosher Beef Stew']
-    raw_material = quantity / info['yield']
+    # Convert cases to pounds using average case weight
+    quantity_lbs = quantity_cases * info['avg_case_weight']
+    raw_material = quantity_lbs / info['yield']
     cost = raw_material * info['production_cost']
     return {
         'product': 'STEW',
-        'order_quantity': quantity,
+        'order_quantity_cases': quantity_cases,
+        'order_quantity_lbs': quantity_lbs,
         'raw_material': raw_material,
         'cost': cost
     }
 
-def calculate_short_rib(quantity):
+def calculate_short_rib(quantity_cases):
     info = products['WF Kosher Boneless Beef Short Ribs']
-    raw_material = quantity / info['yield']
+    # Convert cases to pounds using average case weight
+    quantity_lbs = quantity_cases * info['avg_case_weight']
+    raw_material = quantity_lbs / info['yield']
     cost = raw_material * info['production_cost']
     return {
-        'product': 'BNLS SHORT RIB',
-        'order_quantity': quantity,
+        'product': 'SHORT RIB',
+        'order_quantity_cases': quantity_cases,
+        'order_quantity_lbs': quantity_lbs,
         'raw_material': raw_material,
         'cost': cost
     }
@@ -201,7 +201,7 @@ def order_planning():
     
     # Initialize session state
     if 'item_count' not in st.session_state:
-        st.session_state.item_count = 1
+        st.session_state.item_count = 5  # Start with 5 item slots
     if 'notes' not in st.session_state:
         st.session_state.notes = ""
     
@@ -209,12 +209,12 @@ def order_planning():
     templates = {
         'Default': [],
         'Common Order A': [
-            {'product': 'WF Kosher Boneless Beef Ribeye Steak', 'quantity': 100},
-            {'product': 'WF Kosher Boneless Beef Brisket Flat Cut', 'quantity': 50},
+            {'product': 'WF Kosher Boneless Beef Ribeye Steak', 'quantity': 10},
+            {'product': 'WF Kosher Boneless Beef Brisket Flat Cut', 'quantity': 2},
         ],
         'Common Order B': [
-            {'product': 'WF Kosher Boneless Beef Chuck Roast', 'quantity': 75},
-            {'product': 'WF Kosher Beef Outside Skirt Steak', 'quantity': 25},
+            {'product': 'WF Kosher Boneless Beef Chuck Roast', 'quantity': 7},
+            {'product': 'WF Kosher Beef Outside Skirt Steak', 'quantity': 1},
         ]
     }
     
@@ -267,26 +267,36 @@ def order_planning():
             )
         
         with col2:
+            # Get the product info to display avg case weight as help text
+            product_info = products.get(product, {})
+            avg_case_weight = product_info.get('avg_case_weight', 0)
+            
             quantity = st.number_input(
-                f'Quantity (lbs) {i+1}',
-                min_value=0.0,
-                value=float(default_quantity),
-                step=0.1,
+                f'Quantity (cases) {i+1}',
+                min_value=0,
+                value=int(default_quantity),
+                step=1,
                 key=f'quantity_{i}',
-                help='Enter quantity in pounds'
+                help=f'Enter quantity in cases (avg {avg_case_weight} lbs per case)'
             )
         
         if product and quantity > 0:
             line_items.append({
                 'product': product,
-                'quantity': quantity
+                'quantity_cases': quantity,
+                'quantity_lbs': quantity * products[product]['avg_case_weight']
             })
     
     # Add/Remove item buttons
-    col1, col2 = st.columns([1, 4])
+    col1, col2, col3 = st.columns([1, 1, 3])
     with col1:
         if st.button('+ Add Item'):
             st.session_state.item_count += 1
+            st.rerun()
+    
+    with col2:
+        if st.button('- Remove Item') and st.session_state.item_count > 1:
+            st.session_state.item_count -= 1
             st.rerun()
     
     # Notes section
@@ -306,33 +316,66 @@ def order_planning():
         
         results = []
         total_cost = 0
+        raw_materials_needed = {}
+        
+        # Track grind yields for each raw material
+        grind_yields = {
+            'BRISKET': 0.15,        # 15% of raw material becomes grind
+            '2PC CHUCK': 0.20,      # 20% of raw material becomes grind
+            'SHORT RIB': 0.25,      # 25% of raw material becomes grind
+        }
         
         # Calculate each line item
         for item in line_items:
-            if item['product'] == 'WF Kosher Boneless Beef Ribeye Steak' and item['quantity'] > 0:
-                result = calculate_ribeye(item['quantity'])
+            if item['product'] == 'WF Kosher Boneless Beef Ribeye Steak' and item['quantity_cases'] > 0:
+                result = calculate_ribeye(item['quantity_cases'])
                 results.append(result)
                 total_cost += result['cost']
-            elif item['product'] == 'WF Kosher Boneless Beef Brisket Flat Cut' and item['quantity'] > 0:
-                result = calculate_brisket(item['quantity'])
+                raw_materials_needed[result['product']] = raw_materials_needed.get(result['product'], 0) + result['raw_material']
+            elif item['product'] == 'WF Kosher Boneless Beef Brisket Flat Cut' and item['quantity_cases'] > 0:
+                result = calculate_brisket(item['quantity_cases'])
                 results.append(result)
                 total_cost += result['cost']
-            elif item['product'] == 'WF Kosher Boneless Beef Chuck Roast' and item['quantity'] > 0:
-                result = calculate_chuck_roast(item['quantity'])
+                raw_materials_needed[result['product']] = raw_materials_needed.get(result['product'], 0) + result['raw_material']
+            elif item['product'] == 'WF Kosher Boneless Beef Chuck Roast' and item['quantity_cases'] > 0:
+                result = calculate_chuck_roast(item['quantity_cases'])
                 results.append(result)
                 total_cost += result['cost']
-            elif item['product'] == 'WF Kosher Beef Outside Skirt Steak' and item['quantity'] > 0:
-                result = calculate_outside_skirt(item['quantity'])
+                raw_materials_needed[result['product']] = raw_materials_needed.get(result['product'], 0) + result['raw_material']
+            elif item['product'] == 'WF Kosher Beef Outside Skirt Steak' and item['quantity_cases'] > 0:
+                result = calculate_outside_skirt(item['quantity_cases'])
                 results.append(result)
                 total_cost += result['cost']
-            elif item['product'] == 'WF Kosher Beef Stew' and item['quantity'] > 0:
-                result = calculate_stew(item['quantity'])
+                raw_materials_needed[result['product']] = raw_materials_needed.get(result['product'], 0) + result['raw_material']
+            elif item['product'] == 'WF Kosher Beef Stew' and item['quantity_cases'] > 0:
+                result = calculate_stew(item['quantity_cases'])
                 results.append(result)
                 total_cost += result['cost']
-            elif item['product'] == 'WF Kosher Boneless Beef Short Ribs' and item['quantity'] > 0:
-                result = calculate_short_rib(item['quantity'])
+                raw_materials_needed[result['product']] = raw_materials_needed.get(result['product'], 0) + result['raw_material']
+            elif item['product'] == 'WF Kosher Boneless Beef Short Ribs' and item['quantity_cases'] > 0:
+                result = calculate_short_rib(item['quantity_cases'])
                 results.append(result)
                 total_cost += result['cost']
+                raw_materials_needed[result['product']] = raw_materials_needed.get(result['product'], 0) + result['raw_material']
+        
+        # Calculate total grind produced based on the highest amount of raw material
+        total_grind_produced = 0
+        highest_raw_material = None
+        highest_amount = 0
+        
+        # Find the highest amount of raw material that produces grind
+        for material, amount in raw_materials_needed.items():
+            if material in grind_yields and amount > highest_amount:
+                highest_amount = amount
+                highest_raw_material = material
+        
+        # Calculate grind based only on the highest amount
+        if highest_raw_material:
+            total_grind_produced = highest_amount * grind_yields[highest_raw_material]
+            st.write(f"Debug - Highest raw material: {highest_raw_material}, Amount: {highest_amount:.1f} lbs, Grind yield: {grind_yields[highest_raw_material]}, Total grind: {total_grind_produced:.1f} lbs")
+        else:
+            st.write("Debug - No raw materials found that produce grind")
+            st.write(f"Raw materials: {raw_materials_needed}")
         
         # Display results
         st.markdown("---")
@@ -343,24 +386,27 @@ def order_planning():
         for result in results:
             summary_data.append({
                 'Product': result['product'],
-                'Order Quantity (lbs)': f"{result['order_quantity']:.1f}",
+                'Cases': f"{result['order_quantity_cases']}",
+                'Order Quantity (lbs)': f"{result['order_quantity_lbs']:.1f}",
                 'Raw Material (lbs)': f"{result['raw_material']:.1f}",
                 'Cost': f"${result['cost']:.2f}"
             })
-            
-            # Add additional outputs if present
-            if 'additional_outputs' in result:
-                for output in result['additional_outputs']:
-                    summary_data.append({
-                        'Product': f"→ {output['product']}",
-                        'Order Quantity (lbs)': f"{output['quantity']:.1f}",
-                        'Raw Material (lbs)': '-',
-                        'Cost': '-'
-                    })
         
         # Display summary table
         st.table(pd.DataFrame(summary_data))
         st.markdown(f"**Total Estimated Cost:** ${total_cost:.2f}")
+        
+        # Display total grind produced
+        if total_grind_produced > 0:
+            st.markdown(f"**Total Grind Produced:** {total_grind_produced:.1f} lbs")
+        
+        # Display raw materials needed
+        st.markdown("### Raw Materials Needed")
+        raw_materials_df = pd.DataFrame([
+            {"Raw Material": material, "Quantity (lbs)": f"{quantity:.1f}"}
+            for material, quantity in raw_materials_needed.items()
+        ])
+        st.table(raw_materials_df)
         
         # Create CSV for download
         csv = pd.DataFrame(summary_data).to_csv(index=False)
@@ -373,13 +419,33 @@ def order_planning():
         
         # Save order to database
         try:
+            # Format raw materials as text to include in notes
+            raw_materials_text = "\n\nRaw Materials Needed:\n"
+            for material, quantity in raw_materials_needed.items():
+                raw_materials_text += f"- {material}: {quantity:.1f} lbs\n"
+            
+            # Add grind information to notes
+            if total_grind_produced > 0:
+                raw_materials_text += f"\nTotal Grind Produced: {total_grind_produced:.1f} lbs\n"
+            
+            # Combine user notes with raw materials info
+            combined_notes = notes + raw_materials_text if notes else raw_materials_text
+            
+            # Store raw materials in line_items for display in order cards
+            enhanced_line_items = line_items.copy()
+            
+            # Add raw_materials and grind as metadata to the first line item
+            if enhanced_line_items:
+                enhanced_line_items[0]['_raw_materials'] = raw_materials_needed
+                enhanced_line_items[0]['_total_grind'] = total_grind_produced
+            
             response = supabase.table('orders').insert({
                 'po_number': po_number,
                 'po_date': po_date.isoformat(),
                 'delivery_date': delivery_date.isoformat(),
-                'line_items': line_items,
+                'line_items': enhanced_line_items,
                 'total_cost': total_cost,
-                'notes': notes
+                'notes': combined_notes
             }).execute()
             
             if hasattr(response, 'data'):
@@ -905,7 +971,7 @@ def display_dashboard():
 
 def order_board():
     st.title('Order Board')
-    st.markdown('Track and manage orders')
+    st.markdown('Track and manage orders in Kanban style')
     
     # Fetch orders from database, ordered by delivery date
     response = supabase.table('orders').select('*').order('delivery_date').execute()
@@ -960,59 +1026,156 @@ def order_board():
             (orders_df['po_number'].str.contains(search, case=False, na=False))
         ]
         
-        # Display orders
+        # Create columns for each status
+        status_columns = {}
+        for status in status_filter:
+            status_columns[status] = []
+        
+        # Group orders by status
         for _, order in filtered_df.iterrows():
             try:
-                delivery_date = pd.to_datetime(order.get('delivery_date')).date() if order.get('delivery_date') else None
-                po_date = pd.to_datetime(order.get('po_date')).date() if order.get('po_date') else None
+                status_columns[order['status']].append(order)
+            except Exception as e:
+                st.error(f"Error processing order {order.get('po_number', 'Unknown')}: {str(e)}")
+                continue
+        
+        # Define CSS for the Kanban cards
+        st.markdown("""
+        <style>
+        .kanban-column {
+            background-color: #f5f5f5;
+            border-radius: 5px;
+            padding: 10px;
+            margin: 5px;
+        }
+        .kanban-card {
+            background-color: white;
+            border-radius: 5px;
+            padding: 10px;
+            margin-bottom: 10px;
+            border-left: 5px solid #4CAF50;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .kanban-card.past-due {
+            border-left: 5px solid #f44336;
+        }
+        .kanban-card-header {
+            font-weight: bold;
+            margin-bottom: 5px;
+        }
+        .kanban-card-content {
+            font-size: 0.9em;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        
+        # Display Kanban board
+        cols = st.columns(len(status_columns))
+        
+        for i, (status, orders) in enumerate(status_columns.items()):
+            with cols[i]:
+                st.markdown(f"<h3 style='text-align: center;'>{status.title()}</h3>", unsafe_allow_html=True)
+                st.markdown(f"<div class='kanban-column'>", unsafe_allow_html=True)
                 
-                header = f"PO #{order['po_number']} - {order['status'].title()}"
-                if delivery_date:
-                    header += f" - Due: {delivery_date}"
-                    is_past_due = delivery_date < today and order['status'] not in ['completed', 'cancelled']
-                    if is_past_due:
-                        header = f"PAST DUE - {header}"
-                
-                with st.expander(header):
-                    col1, col2, col3, col4 = st.columns(4)
+                for order in orders:
+                    delivery_date = pd.to_datetime(order.get('delivery_date')).date() if order.get('delivery_date') else None
+                    is_past_due = delivery_date and delivery_date < today and order['status'] not in ['completed', 'cancelled']
                     
+                    # Create a unique key for each order
+                    order_key = f"order_{order['id']}"
+                    
+                    # Create the card HTML
+                    card_class = "kanban-card past-due" if is_past_due else "kanban-card"
+                    card_html = f"""
+                    <div class='{card_class}' id='{order_key}'>
+                        <div class='kanban-card-header'>PO #{order['po_number']}</div>
+                        <div class='kanban-card-content'>
+                    """
+                    
+                    # Add delivery date if available
+                    if delivery_date:
+                        card_html += f"Due: {delivery_date}<br>"
+                        if is_past_due:
+                            card_html += f"<span style='color: red;'>PAST DUE</span><br>"
+                    
+                    # Add cost
+                    card_html += f"Cost: ${order['total_cost']:,.2f}<br>"
+                    
+                    # Add line items summary (first 2 items)
+                    if order.get('line_items'):
+                        card_html += "Items:<br>"
+                        for i, item in enumerate(order['line_items'][:2]):
+                            product_name = item['product'].split()[-1]
+                            cases = item.get('quantity_cases', 0)
+                            lbs = item.get('quantity_lbs', item.get('quantity', 0))
+                            card_html += f"- {product_name}: {cases} cases ({lbs:,.1f} lbs)<br>"
+                        if len(order['line_items']) > 2:
+                            card_html += f"- and {len(order['line_items']) - 2} more items<br>"
+                    
+                    # Add raw materials needed if available
+                    raw_materials = None
+                    total_grind = 0
+                    if order.get('line_items') and len(order['line_items']) > 0:
+                        # Check if raw materials are stored in the first line item
+                        if '_raw_materials' in order['line_items'][0]:
+                            raw_materials = order['line_items'][0]['_raw_materials']
+                        # Check if total grind is stored in the first line item
+                        if '_total_grind' in order['line_items'][0]:
+                            total_grind = order['line_items'][0]['_total_grind']
+                    
+                    if raw_materials:
+                        card_html += "<hr style='margin: 5px 0;'>"
+                        card_html += "<b>Raw Materials Needed:</b><br>"
+                        for material, quantity in raw_materials.items():
+                            card_html += f"- {material}: {quantity:,.1f} lbs<br>"
+                    
+                    # Add total grind produced if available
+                    if total_grind > 0:
+                        card_html += "<hr style='margin: 5px 0;'>"
+                        card_html += f"<b>Total Grind Produced:</b> {total_grind:,.1f} lbs<br>"
+                    
+                    card_html += "</div></div>"
+                    
+                    # Display the card
+                    st.markdown(card_html, unsafe_allow_html=True)
+                    
+                    # Add buttons for actions
+                    col1, col2 = st.columns(2)
                     with col1:
-                        st.markdown(f"**Total Cost:** ${order['total_cost']:,.2f}")
+                        if st.button("View Details", key=f"view_{order['id']}"):
+                            with st.expander("Order Details", expanded=True):
+                                st.markdown(f"**PO Number:** {order['po_number']}")
+                                st.markdown(f"**Total Cost:** ${order['total_cost']:,.2f}")
+                                if delivery_date:
+                                    st.markdown(f"**Delivery Date:** {delivery_date}")
+                                po_date = pd.to_datetime(order.get('po_date')).date() if order.get('po_date') else None
+                                if po_date:
+                                    st.markdown(f"**PO Date:** {po_date}")
+                                
+                                st.markdown("### Line Items")
+                                for item in order['line_items']:
+                                    st.markdown(f"- {item['product']}: {item['quantity_cases']} cases ({item['quantity_lbs']:,.1f} lbs)")
+                                
+                                if order.get('notes'):
+                                    st.markdown("### Notes")
+                                    st.markdown(order['notes'])
                     
                     with col2:
-                        if po_date:
-                            st.markdown(f"**PO Date:** {po_date}")
-                        else:
-                            st.markdown("**PO Date:** Not set")
-                    
-                    with col3:
-                        st.markdown(f"**Status:** {order['status'].title()}")
-                    
-                    with col4:
                         new_status = st.selectbox(
-                            'Update Status',
+                            'Update',
                             ['pending', 'in_production', 'completed', 'cancelled'],
                             index=['pending', 'in_production', 'completed', 'cancelled'].index(order['status']),
                             key=f"status_{order['id']}"
                         )
                         
                         if new_status != order['status']:
-                            if st.button('Update', key=f"update_{order['id']}"):
+                            if st.button('Move', key=f"update_{order['id']}"):
                                 response = supabase.table('orders').update({'status': new_status}).eq('id', order['id']).execute()
                                 if hasattr(response, 'data'):
                                     st.success('Status updated!')
                                     st.rerun()
-                    
-                    st.markdown("### Line Items")
-                    for item in order['line_items']:
-                        st.markdown(f"- {item['product']}: {item['quantity']:,.1f} lbs")
-                    
-                    if order.get('notes'):
-                        st.markdown("### Notes")
-                        st.markdown(order['notes'])
-            except Exception as e:
-                st.error(f"Error displaying order {order.get('po_number', 'Unknown')}: {str(e)}")
-                continue
+                
+                st.markdown("</div>", unsafe_allow_html=True)
     else:
         st.info("No orders found")
 
